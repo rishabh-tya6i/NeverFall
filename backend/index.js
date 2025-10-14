@@ -11,6 +11,7 @@ import productRoutes from "./Routes/product.routes.js";
 import cartRoutes from "./Routes/cart.routes.js";
 import couponRoutes from "./Routes/coupon.routes.js";
 import orderRoutes from "./Routes/order.routes.js";
+import paymentRoutes from "./Routes/payment.routes.js";
 import { connectRedis } from "./lib/redis.js";
 
 const app = express();
@@ -41,6 +42,7 @@ app.use("/api/products", productRoutes);
 app.use("/api/reviews", reviewRoutes);
 app.use("/api/cart", cartRoutes);
 app.use("/api/coupons", couponRoutes);
+app.use("/api/payments", paymentRoutes);
 app.use("/api/orders", orderRoutes);
 
 app.use((req, res) => res.status(404).json({ error: "Route not found" }));

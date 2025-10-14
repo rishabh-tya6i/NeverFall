@@ -6,6 +6,7 @@ import Product from "../Models/Product.js";
 import ProductVariant from "../Models/ProductVariant.js";
 import Coupon from "../Models/Coupon.js";
 import Payment from "../Models/Payments.js";
+import PaymentSession from "../Models/PaymentSession.js";
 import PaymentGatewayConfig from "../Models/PaymentGatewayConfig.js";
 import User from "../Models/User.js";
 import WalletTransaction from "../Models/WalletTransaction.js";
@@ -36,7 +37,7 @@ const StockReservationSchema = new mongoose.Schema(
           required: true,
         },
         qty: { type: Number, required: true },
-        price: { type: Number, required: true }, // Store price at reservation time
+        price: { type: Number, required: true },
       },
     ],
     status: {
@@ -76,41 +77,6 @@ const CouponUsage =
   mongoose.models.CouponUsage ||
   mongoose.model("CouponUsage", CouponUsageSchema);
 
-/**
- * Payment State Machine
- */
-const PAYMENT_STATE_MACHINE = {
-  created: ["attempted", "success", "failed", "cancelled"],
-  attempted: ["success", "failed", "cancelled"],
-  success: ["refunded", "partially_refunded"],
-  failed: ["created", "cancelled"],
-  cod_pending: ["success", "cancelled"],
-  cancelled: [],
-  refunded: [],
-  partially_refunded: ["refunded"],
-};
-
-/**
- * Order State Machine
- */
-const ORDER_STATE_MACHINE = {
-  pending: ["confirmed", "cancelled", "failed"],
-  confirmed: ["processing", "cancelled"],
-  processing: ["out-for-delivery", "cancelled"],
-  "out-for-delivery": ["delivered", "return-requested"],
-  delivered: ["return-requested", "refunded"],
-  "return-requested": ["returned", "picked-up", "exchange-requested"],
-  returned: ["refunded"],
-  "exchange-requested": ["exchange-approved", "exchange-rejected"],
-  "exchange-approved": ["exchanged", "picked-up"],
-  "picked-up": ["refunded", "exchanged"],
-  exchanged: [],
-  "exchange-rejected": ["returned"],
-  refunded: [],
-  cancelled: [],
-  failed: [],
-};
-
 // ========== UTILITY FUNCTIONS ==========
 
 function validateStateTransition(currentState, newState, stateMachine) {
@@ -122,6 +88,10 @@ function validateStateTransition(currentState, newState, stateMachine) {
 
 function generateIdempotencyKey() {
   return `idemp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+function generateSessionId() {
+  return `sess_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 }
 
 async function validateUserOwnership(
@@ -362,11 +332,16 @@ async function processWalletPayment(userId, amount, orderId, session) {
   const user = await User.findById(userId).session(session);
   const walletAvailable = Number(user.wallet?.balance || 0);
 
-  if (walletAvailable < amount) {
-    throw new Error(
-      `Insufficient wallet balance. Available: ${walletAvailable}, Required: ${amount}`
-    );
+  if (walletAvailable <= 0) {
+    throw new Error("Wallet balance is zero");
   }
+
+  if (amount <= 0) {
+    throw new Error("Invalid wallet payment amount");
+  }
+
+  // Double-check we're not trying to deduct more than available
+  const actualDeductAmount = Math.min(amount, walletAvailable);
 
   // Create wallet transaction
   const walletTx = await WalletTransaction.create(
@@ -374,20 +349,31 @@ async function processWalletPayment(userId, amount, orderId, session) {
       {
         user: userId,
         type: "debit",
-        amount: amount,
+        amount: actualDeductAmount,
         currency: "INR",
         status: "available",
         source: "order",
         refId: orderId,
-        meta: { note: "Wallet debit for order payment" },
+        meta: {
+          note: "Wallet debit for order payment",
+          originalRequested: amount,
+          actualProcessed: actualDeductAmount,
+        },
       },
     ],
     { session }
   );
 
   // Update user balance
-  user.wallet.balance = walletAvailable - amount;
+  user.wallet.balance = walletAvailable - actualDeductAmount;
   await user.save({ session });
+
+  logger.info("Wallet payment processed successfully", {
+    userId,
+    requested: amount,
+    processed: actualDeductAmount,
+    remainingBalance: user.wallet.balance,
+  });
 
   return walletTx[0];
 }
@@ -445,9 +431,6 @@ async function createStockReservation(orderId, items, paymentId, session) {
   return reservation;
 }
 
-
-
-
 async function consumeStockReservation(orderId, paymentId, session) {
   const reservation = await StockReservation.findOne({
     order: orderId,
@@ -461,8 +444,6 @@ async function consumeStockReservation(orderId, paymentId, session) {
   }
   return reservation;
 }
-
-
 
 async function releaseStockReservation(orderId, paymentId, session) {
   const reservation = await StockReservation.findOne({
@@ -484,213 +465,566 @@ async function releaseStockReservation(orderId, paymentId, session) {
   return reservation;
 }
 
-// ========== WEBHOOKS & AUTO-MANAGEMENT ==========
+// ========== PAYMENT SERVICE CLASS ==========
 
-/**
- * Automatic Reservation Cleanup Service
- * Run this periodically to clean up expired reservations
- */
-export async function cleanupExpiredReservations() {
-  const session = await mongoose.startSession();
-  try {
-    session.startTransaction();
+class PaymentService {
+  /**
+   * Create payment session and process payment
+   */
+  async createPaymentSession(userId, orderId, sessionData) {
+    const session = await mongoose.startSession();
 
-    const expiredReservations = await StockReservation.find({
-      status: "active",
-      reservedUntil: { $lt: new Date() },
-    }).session(session);
+    try {
+      session.startTransaction();
 
-    for (const reservation of expiredReservations) {
-      logger.info("Cleaning up expired reservation", {
-        reservationId: reservation._id,
-        orderId: reservation.order,
-      });
+      // 1. Validate order and user
+      const [order, user] = await Promise.all([
+        Order.findById(orderId).session(session),
+        User.findById(userId).session(session),
+      ]);
 
-      // Release stock
-      for (const it of reservation.items) {
-        await incrementVariantStock(it.variant, it.qty, session);
+      if (!order || order.status !== "pending") {
+        throw new Error("Order not available for payment");
       }
 
-      // Update reservation status
-      reservation.status = "expired";
-      await reservation.save({ session });
+      if (order.user.toString() !== userId) {
+        throw new Error("Unauthorized access to order");
+      }
 
-      // Revert coupon usage if any
-      const order = await Order.findById(reservation.order).session(session);
-      if (order && order.coupon && order.coupon.couponId) {
+      // 2. Validate wallet balance (read-only - NO DEDUCTION)
+      if (sessionData.walletAmount > 0) {
+        if (user.wallet.balance < sessionData.walletAmount) {
+          throw new Error("Insufficient wallet balance");
+        }
+        if (sessionData.walletAmount > order.total) {
+          throw new Error("Wallet amount exceeds order total");
+        }
+      }
+
+      const gatewayAmount = order.total - sessionData.walletAmount;
+
+      // 3. Reserve stock atomically
+      for (const item of order.items) {
+        await decrementVariantStockAtomic(item.variant, item.quantity, session);
+      }
+
+      // 4. Create stock reservation
+      const stockReservation = await createStockReservation(
+        order._id,
+        order.items,
+        null,
+        session
+      );
+
+      // 5. Reserve coupon usage atomically
+      let couponReservedMeta = { couponId: null, usageRecordId: null };
+      let discountAmount = order.discountAmount || 0;
+
+      if (order.coupon?.couponId) {
+        const couponDoc = await Coupon.findById(order.coupon.couponId).session(
+          session
+        );
+        if (!couponDoc || !couponDoc.active) {
+          throw new Error("Coupon invalid or expired");
+        }
+
+        const applicableSubtotal = await computeApplicableSubtotalForCoupon(
+          couponDoc,
+          order.items,
+          session
+        );
+
+        const reserved = await reserveCouponUsageAtomic(
+          couponDoc.code,
+          userId,
+          order.subtotal,
+          applicableSubtotal,
+          session
+        );
+
+        couponReservedMeta.couponId = reserved.coupon._id;
+        couponReservedMeta.usageRecordId = reserved.usageRecord?._id || null;
+
+        // Recalculate discount
+        if (reserved.coupon.type === "fixed") {
+          discountAmount = Math.min(reserved.coupon.value, applicableSubtotal);
+        } else if (reserved.coupon.type === "percentage") {
+          discountAmount = (applicableSubtotal * reserved.coupon.value) / 100;
+          if (reserved.coupon.maxDiscountAmount) {
+            discountAmount = Math.min(
+              discountAmount,
+              reserved.coupon.maxDiscountAmount
+            );
+          }
+        }
+      }
+
+      // ✅ FIX 1 & 2: Update order with final discount amounts and store couponId
+      order.discountAmount = discountAmount;
+      order.total = order.subtotal - discountAmount;
+      order.paymentMethod = sessionData.paymentMethod;
+      await order.save({ session });
+
+      // 6. Create or update payment session (ATOMIC)
+      const paymentSession = await PaymentSession.findOneAndUpdate(
+        { order: orderId, status: "active" },
+        {
+          $setOnInsert: {
+            sessionId: sessionData.sessionId,
+            user: userId,
+            order: orderId,
+            walletAmount: sessionData.walletAmount,
+            paymentMethod: sessionData.paymentMethod,
+            status: "active",
+            createdAt: new Date(),
+            meta: {
+              userAgent: sessionData.userAgent,
+              ip: sessionData.ip,
+              couponUsageRecordId: couponReservedMeta.usageRecordId,
+              couponId: couponReservedMeta.couponId, // ✅ FIX 1: Store couponId
+            },
+          },
+        },
+        {
+          upsert: true,
+          new: true,
+          session: session,
+        }
+      );
+
+      let gatewayPayload = null;
+
+      // 7. Handle different payment methods
+      if (sessionData.paymentMethod === "cod") {
+        // COD - immediately confirm order and deduct wallet
+        await this.processCODPayment(
+          order,
+          user,
+          paymentSession,
+          stockReservation,
+          session
+        );
+      } else {
+        // Online payment - create gateway order (wallet deducted later in webhook)
+        const adapter = await getActiveGatewayAdapter();
+        gatewayPayload = await adapter.createOrder({
+          amount: gatewayAmount,
+          currency: "INR",
+          receipt: `order_${orderId}_${sessionData.sessionId}`,
+          notes: {
+            orderId: orderId.toString(),
+            sessionId: sessionData.sessionId,
+            userId: userId.toString(),
+          },
+        });
+
+        paymentSession.gatewayOrderId = gatewayPayload.id;
+        await paymentSession.save({ session });
+
+        // Link stock reservation to payment session
+        stockReservation.payment = paymentSession._id;
+        await stockReservation.save({ session });
+      }
+
+      await session.commitTransaction();
+
+      logger.info("Payment session created successfully", {
+        sessionId: paymentSession.sessionId,
+        orderId,
+        paymentMethod: sessionData.paymentMethod,
+        walletAmount: sessionData.walletAmount,
+        gatewayAmount,
+      });
+
+      return {
+        success: true,
+        sessionId: paymentSession.sessionId,
+        gateway: gatewayPayload,
+        walletAmount: sessionData.walletAmount,
+        gatewayAmount: gatewayAmount,
+        paymentMethod: sessionData.paymentMethod,
+        orderStatus:
+          sessionData.paymentMethod === "cod" ? "confirmed" : "pending",
+      };
+    } catch (error) {
+      await session.abortTransaction();
+      logger.error("Payment session creation failed", {
+        orderId,
+        userId,
+        error: error.message,
+      });
+      throw error;
+    } finally {
+      session.endSession();
+    }
+  }
+
+  /**
+   * Process COD payment - deduct wallet immediately
+   */
+  async processCODPayment(
+    order,
+    user,
+    paymentSession,
+    stockReservation,
+    dbSession
+  ) {
+    // 1. Deduct wallet amount if any
+    if (paymentSession.walletAmount > 0) {
+      user.wallet.balance -= paymentSession.walletAmount;
+      await user.save({ session: dbSession });
+
+      await WalletTransaction.create(
+        [
+          {
+            user: user._id,
+            type: "debit",
+            amount: paymentSession.walletAmount,
+            currency: "INR",
+            status: "available",
+            source: "order",
+            refId: order._id,
+            meta: { note: "Wallet payment for COD order" },
+          },
+        ],
+        { session: dbSession }
+      );
+    }
+
+    const codAmount = order.total - paymentSession.walletAmount;
+
+    // 2. Create COD payment record
+    const payment = new Payment({
+      order: order._id,
+      user: user._id,
+      method: "cod",
+      amount: codAmount,
+      currency: "INR",
+      status: "cod_pending",
+      meta: { sessionId: paymentSession.sessionId },
+    });
+    await payment.save({ session: dbSession });
+
+    // 3. Update order status
+    order.status = "confirmed";
+    order.paymentMethod = "cod";
+
+    // Add payment snapshots
+    if (paymentSession.walletAmount > 0) {
+      order.payments.push({
+        method: "wallet",
+        amount: paymentSession.walletAmount,
+        status: "success",
+        meta: {},
+      });
+    }
+
+    order.payments.push({
+      method: "cod",
+      amount: codAmount,
+      status: "cod_pending",
+      meta: {},
+    });
+
+    await order.save({ session: dbSession });
+
+    // 4. Consume stock reservation
+    stockReservation.status = "consumed";
+    stockReservation.payment = payment._id;
+    await stockReservation.save({ session: dbSession });
+
+    // 5. Mark session completed
+    paymentSession.status = "completed";
+    paymentSession.completedAt = new Date();
+    await paymentSession.save({ session: dbSession });
+
+    // 6. Clear cart
+    await Cart.updateOne(
+      { user: user._id },
+      { $set: { items: [], totalValue: 0 } },
+      { session: dbSession }
+    );
+
+    logger.info("COD order processed successfully", {
+      sessionId: paymentSession.sessionId,
+      orderId: order._id,
+      walletAmount: paymentSession.walletAmount,
+      codAmount,
+    });
+  }
+
+  /**
+   * Process successful online payment (via webhook)
+   */
+  async processSuccessfulPayment(gatewayPaymentId, sessionId, gatewayData) {
+    const session = await mongoose.startSession();
+
+    try {
+      session.startTransaction();
+
+      // 1. Find active payment session
+      const paymentSession = await PaymentSession.findOne({
+        sessionId: sessionId,
+        status: "active",
+      }).session(session);
+
+      if (!paymentSession) {
+        throw new Error("Payment session not found or already processed");
+      }
+
+      // 2. Verify payment with gateway
+      const adapter = await getActiveGatewayAdapter();
+      const verification = await adapter.verifyPayment(gatewayData);
+
+      if (!verification.valid) {
+        throw new Error("Payment verification failed");
+      }
+
+      const [order, user] = await Promise.all([
+        Order.findById(paymentSession.order).session(session),
+        User.findById(paymentSession.user).session(session),
+      ]);
+
+      // ✅ FIX 4: Ensure order pricing consistency in webhook
+      // Recalculate and apply final pricing to maintain consistency
+      if (paymentSession.meta.couponId) {
+        const coupon = await Coupon.findById(
+          paymentSession.meta.couponId
+        ).session(session);
+        if (coupon && coupon.active) {
+          const applicableSubtotal = await computeApplicableSubtotalForCoupon(
+            coupon,
+            order.items,
+            session
+          );
+
+          let finalDiscount = 0;
+          if (coupon.type === "fixed") {
+            finalDiscount = Math.min(coupon.value, applicableSubtotal);
+          } else if (coupon.type === "percentage") {
+            finalDiscount = (applicableSubtotal * coupon.value) / 100;
+            if (coupon.maxDiscountAmount) {
+              finalDiscount = Math.min(finalDiscount, coupon.maxDiscountAmount);
+            }
+          }
+
+          order.discountAmount = finalDiscount;
+          order.total = order.subtotal - finalDiscount;
+        }
+      }
+
+      // 3. Process wallet payment if any (ONLY NOW - when payment is certain)
+      if (paymentSession.walletAmount > 0) {
+        // Final balance check (might have changed since session creation)
+        if (user.wallet.balance < paymentSession.walletAmount) {
+          throw new Error("Insufficient wallet balance at payment time");
+        }
+
+        user.wallet.balance -= paymentSession.walletAmount;
+        await user.save({ session });
+
+        await WalletTransaction.create(
+          [
+            {
+              user: user._id,
+              type: "debit",
+              amount: paymentSession.walletAmount,
+              currency: "INR",
+              status: "available",
+              source: "order",
+              refId: order._id,
+              meta: { note: "Wallet payment for online order" },
+            },
+          ],
+          { session }
+        );
+      }
+
+      // 4. Create gateway payment record
+      const payment = new Payment({
+        order: order._id,
+        user: user._id,
+        method: paymentSession.paymentMethod,
+        amount: verification.amount,
+        currency: "INR",
+        gatewayPaymentId: gatewayPaymentId,
+        status: "success",
+        meta: {
+          sessionId: sessionId,
+          gatewayData: verification,
+        },
+      });
+      await payment.save({ session });
+
+      // 5. Update order
+      order.status = "confirmed";
+      order.paymentMethod = paymentSession.paymentMethod;
+
+      // Add payment snapshots
+      if (paymentSession.walletAmount > 0) {
+        order.payments.push({
+          method: "wallet",
+          amount: paymentSession.walletAmount,
+          status: "success",
+          meta: {},
+        });
+      }
+
+      order.payments.push({
+        method: paymentSession.paymentMethod,
+        amount: verification.amount,
+        gatewayPaymentId: gatewayPaymentId,
+        status: "success",
+        meta: {},
+      });
+
+      await order.save({ session });
+
+      // 6. Consume stock reservation
+      const stockReservation = await StockReservation.findOne({
+        order: order._id,
+        status: "active",
+      }).session(session);
+
+      if (stockReservation) {
+        stockReservation.status = "consumed";
+        stockReservation.payment = payment._id;
+        await stockReservation.save({ session });
+      }
+
+      // 7. Mark session completed
+      paymentSession.status = "completed";
+      paymentSession.completedAt = new Date();
+      paymentSession.meta.gatewayResponse = verification;
+      await paymentSession.save({ session });
+
+      // 8. Clear cart
+      await Cart.updateOne(
+        { user: user._id },
+        { $set: { items: [], totalValue: 0 } },
+        { session }
+      );
+
+      await session.commitTransaction();
+
+      logger.info("Online payment processed successfully", {
+        sessionId,
+        orderId: order._id,
+        walletAmount: paymentSession.walletAmount,
+        gatewayAmount: verification.amount,
+      });
+
+      return { success: true, orderId: order._id };
+    } catch (error) {
+      await session.abortTransaction();
+
+      logger.error("Online payment processing failed", {
+        sessionId,
+        error: error.message,
+      });
+
+      throw error;
+    } finally {
+      session.endSession();
+    }
+  }
+
+  /**
+   * Handle payment failure
+   */
+  async handlePaymentFailure(sessionId, reason = "unknown") {
+    const session = await mongoose.startSession();
+
+    try {
+      session.startTransaction();
+
+      // 1. Find and mark session as failed
+      const paymentSession = await PaymentSession.findOneAndUpdate(
+        { sessionId: sessionId, status: "active" },
+        {
+          status: "failed",
+          meta: { failureReason: reason },
+        },
+        { session, new: true }
+      );
+
+      if (!paymentSession) {
+        await session.commitTransaction();
+        return { success: false, message: "Session not found" };
+      }
+
+      // 2. Release stock reservation
+      await releaseStockReservation(paymentSession.order, null, session);
+
+      // ✅ FIX 3: Fix coupon revert in failure handling
+      if (
+        paymentSession.meta.couponUsageRecordId &&
+        paymentSession.meta.couponId
+      ) {
         await revertCouponReservation(
-          order.coupon.couponId,
-          null, // We don't have usageRecordId here, would need to store it
+          paymentSession.meta.couponId, // ✅ Now we have couponId
+          paymentSession.meta.couponUsageRecordId,
           session
         );
       }
 
-      // Update order status
+      // 4. Update order status if needed
+      const order = await Order.findById(paymentSession.order).session(session);
       if (order && order.status === "pending") {
         order.status = "failed";
-        order.meta.failureReason = "reservation_expired";
+        order.meta.paymentFailure = {
+          sessionId,
+          reason,
+          timestamp: new Date(),
+        };
         await order.save({ session });
       }
 
-      logger.info("Expired reservation cleaned up", {
-        reservationId: reservation._id,
+      await session.commitTransaction();
+
+      logger.info("Payment failure handled", { sessionId, reason });
+
+      return { success: true, sessionId };
+    } catch (error) {
+      await session.abortTransaction();
+      logger.error("Payment failure handling failed", {
+        sessionId,
+        error: error.message,
       });
+      throw error;
+    } finally {
+      session.endSession();
+    }
+  }
+
+  /**
+   * Get payment session status
+   */
+  async getPaymentStatus(sessionId) {
+    const paymentSession = await PaymentSession.findOne({ sessionId });
+
+    if (!paymentSession) {
+      return { status: "expired" };
     }
 
-    await session.commitTransaction();
-    session.endSession();
-
-    return { cleaned: expiredReservations.length };
-  } catch (error) {
-    await session.abortTransaction();
-    session.endSession();
-    logger.error("Reservation cleanup failed", { error: error.message });
-    throw error;
+    return {
+      status: paymentSession.status,
+      sessionId: paymentSession.sessionId,
+      orderId: paymentSession.order,
+      paymentMethod: paymentSession.paymentMethod,
+      walletAmount: paymentSession.walletAmount,
+      completedAt: paymentSession.completedAt,
+    };
   }
 }
 
-/**
- * Payment Failure Auto-Handler
- */
-export async function handlePaymentFailure(paymentId, reason = "unknown") {
-  const session = await mongoose.startSession();
-  try {
-    session.startTransaction();
+// Create payment service instance
+const paymentService = new PaymentService();
 
-    const payment = await Payment.findById(paymentId).session(session);
-    if (!payment) {
-      throw new Error(`Payment not found: ${paymentId}`);
-    }
-
-    logger.info("Handling payment failure", { paymentId, reason });
-
-    // Refund any wallet payments for this order
-    const walletPayments = await Payment.find({
-      order: payment.order,
-      method: "wallet",
-      status: "success",
-    }).session(session);
-
-    for (const wp of walletPayments) {
-      await processWalletRefund(
-        wp.user,
-        wp.amount,
-        wp.order,
-        `Refund due to payment failure: ${reason}`,
-        session
-      );
-      wp.status = "refunded";
-      wp.meta.refundReason = "payment_failure";
-      await wp.save({ session });
-    }
-
-    // Release stock reservations
-    await releaseStockReservation(payment.order, paymentId, session);
-
-    // Revert coupon usage
-    const order = await Order.findById(payment.order).session(session);
-    if (order && order.coupon && order.coupon.couponId) {
-      await revertCouponReservation(
-        order.coupon.couponId,
-        null, // Would need usageRecordId stored somewhere
-        session
-      );
-    }
-
-    // Update payment status
-    validateStateTransition(payment.status, "failed", PAYMENT_STATE_MACHINE);
-    payment.status = "failed";
-    payment.meta.failureReason = reason;
-    await payment.save({ session });
-
-    // Update order status
-    if (order) {
-      validateStateTransition(order.status, "failed", ORDER_STATE_MACHINE);
-      order.status = "failed";
-      order.meta.paymentFailure = { paymentId, reason, timestamp: new Date() };
-      await order.save({ session });
-    }
-
-    await session.commitTransaction();
-    session.endSession();
-
-    logger.info("Payment failure handled successfully", { paymentId });
-    return { success: true, paymentId };
-  } catch (error) {
-    await session.abortTransaction();
-    session.endSession();
-    logger.error("Payment failure handling failed", {
-      paymentId,
-      error: error.message,
-    });
-    throw error;
-  }
-}
+// ========== CONTROLLER ACTIONS ==========
 
 /**
- * Webhook for Gateway Notifications
- */
-export const paymentWebhook = async (req, res) => {
-  const gateway = req.params.gateway; // razorpay, payu, etc
-  const payload = req.body;
-
-  try {
-    logger.info("Payment webhook received", { gateway, payload });
-
-    const adapter = await getActiveGatewayAdapter();
-    const verification = await adapter.verifyWebhook(payload);
-
-    if (!verification.valid) {
-      logger.warn("Invalid webhook signature", { gateway });
-      return res.status(400).json({ error: "Invalid signature" });
-    }
-
-    const { paymentId, status, gatewayPaymentId, amount, currency } =
-      verification;
-
-    // Find payment record
-    const payment = await Payment.findOne({
-      gatewayPaymentId: gatewayPaymentId,
-    });
-
-    if (!payment) {
-      logger.error("Payment not found for webhook", { gatewayPaymentId });
-      return res.status(404).json({ error: "Payment not found" });
-    }
-
-    switch (status) {
-      case "success":
-        await confirmPayment({
-          params: { paymentId: payment._id },
-          body: { gatewayPayload: payload },
-        });
-        break;
-
-      case "failed":
-        await handlePaymentFailure(payment._id, "gateway_failure");
-        break;
-
-      case "refunded":
-        // Handle refund webhook
-        await processGatewayRefund(payment, payload);
-        break;
-    }
-
-    res.json({ ok: true });
-  } catch (error) {
-    logger.error("Payment webhook error", {
-      gateway,
-      error: error.message,
-      payload,
-    });
-    res.status(500).json({ error: "Webhook processing failed" });
-  }
-};
-
-// ========== MAIN CONTROLLER ACTIONS ==========
-
-/**
- * Create Order (Buy Now/Cart)
+ * Create Order
  */
 export const createOrder = async (req, res) => {
   const idempotencyKey =
@@ -839,447 +1173,122 @@ export const createOrder = async (req, res) => {
 };
 
 /**
- * Make Payment - Core payment processing
+ * Create Payment Session
  */
-export const makePayment = async (req, res) => {
-  const session = await mongoose.startSession();
+export const createPaymentSession = async (req, res) => {
   try {
-    session.startTransaction();
-
     const { orderId } = req.params;
     const {
-      method,
-      useWallet = false,
-      idempotencyKey = generateIdempotencyKey(),
+      walletAmount = 0,
+      paymentMethod,
+      sessionId = generateSessionId(),
     } = req.body;
+
     const userId = req.user?._id || req.body.userId;
 
-    if (!["cod", "wallet", "razorpay", "payu"].includes(method)) {
-      throw new Error("Unsupported payment method");
+    if (!["cod", "razorpay", "payu"].includes(paymentMethod)) {
+      return res.status(400).json({ message: "Unsupported payment method" });
     }
 
-    const order = await Order.findById(orderId).session(session);
-    if (!order) throw new Error("Order not found");
-    validateUserOwnership(order, userId, "order");
-
-    if (order.status !== "pending") {
-      throw new Error("Order not in payable state");
-    }
-
-    logger.info("Starting payment process", {
+    logger.info("Creating payment session", {
       orderId,
-      method,
-      useWallet,
+      paymentMethod,
+      walletAmount,
+      sessionId,
       userId,
     });
 
-    // Revalidate prices and stock
-    const { validatedItems, serverSubtotal } =
-      await validateAndRecalculatePrices(order.items, session);
-    order.items = validatedItems;
+    const result = await paymentService.createPaymentSession(userId, orderId, {
+      sessionId,
+      walletAmount,
+      paymentMethod,
+      userAgent: req.get("User-Agent"),
+      ip: req.ip,
+    });
 
-    // Reserve coupon usage atomically
-    let discountAmount = order.discountAmount || 0;
-    let couponReservedMeta = { couponId: null, usageRecordId: null };
-
-    if (order.coupon?.couponId) {
-      const couponDoc = await Coupon.findById(order.coupon.couponId).session(
-        session
-      );
-      if (!couponDoc || !couponDoc.active) {
-        throw new Error("Coupon invalid or expired");
-      }
-
-      const applicableSubtotal = await computeApplicableSubtotalForCoupon(
-        couponDoc,
-        order.items,
-        session
-      );
-
-      const reserved = await reserveCouponUsageAtomic(
-        couponDoc.code,
-        userId,
-        serverSubtotal,
-        applicableSubtotal,
-        session
-      );
-
-      couponReservedMeta.couponId = reserved.coupon._id;
-      couponReservedMeta.usageRecordId = reserved.usageRecord?._id || null;
-
-      // Recalculate discount with reserved coupon
-      if (reserved.coupon.type === "fixed") {
-        discountAmount = Math.min(reserved.coupon.value, applicableSubtotal);
-      } else if (reserved.coupon.type === "percentage") {
-        discountAmount = (applicableSubtotal * reserved.coupon.value) / 100;
-        if (reserved.coupon.maxDiscountAmount) {
-          discountAmount = Math.min(
-            discountAmount,
-            reserved.coupon.maxDiscountAmount
-          );
-        }
-      }
-    }
-
-    const totalPayable = Math.max(0, serverSubtotal - discountAmount);
-
-    // Reserve stock atomically
-    for (const it of order.items) {
-      await decrementVariantStockAtomic(it.variant, it.quantity, session);
-    }
-
-    // Create stock reservation
-    const reservation = await createStockReservation(
-      order._id,
-      order.items,
-      null, // paymentId will be set later
-      session
-    );
-
-    // Process wallet payment if requested
-    let remaining = totalPayable;
-    const paymentSnapshots = [];
-
-    if (useWallet) {
-      const walletTx = await processWalletPayment(
-        userId,
-        remaining,
-        order._id,
-        session
-      );
-
-      const walletPayment = new Payment({
-        order: order._id,
-        user: userId,
-        method: "wallet",
-        amount: remaining,
-        currency: "INR",
-        gatewayPaymentId: null,
-        status: "success",
-        meta: { walletTxId: walletTx._id },
-        idempotencyKey,
-      });
-      await walletPayment.save({ session });
-
-      paymentSnapshots.push({
-        method: "wallet",
-        amount: remaining,
-        gatewayPaymentId: null,
-        status: "success",
-        meta: { walletTxId: walletTx._id },
-      });
-
-      remaining = 0;
-    }
-
-    // Handle remaining amount based on payment method
-    if (remaining <= 0) {
-      // Fully paid by wallet
-      await finalizeOrderPayment(
-        order,
-        paymentSnapshots,
-        "wallet",
-        discountAmount,
-        totalPayable,
-        reservation,
-        userId,
-        session
-      );
-
-      await session.commitTransaction();
-      session.endSession();
-
-      logger.info("Order fully paid by wallet", { orderId: order._id });
-      return res.json({
-        ok: true,
-        order,
-        message: "Order paid fully by wallet",
-      });
-    }
-
-    if (method === "cod") {
-      const codPayment = new Payment({
-        order: order._id,
-        user: userId,
-        method: "cod",
-        amount: remaining,
-        currency: "INR",
-        gatewayPaymentId: null,
-        status: "cod_pending",
-        meta: {},
-        idempotencyKey,
-      });
-      await codPayment.save({ session });
-
-      paymentSnapshots.push({
-        method: "cod",
-        amount: remaining,
-        gatewayPaymentId: null,
-        status: "cod_pending",
-        meta: {},
-      });
-
-      // Link reservation to COD payment
-      reservation.payment = codPayment._id;
-      await reservation.save({ session });
-
-      await finalizeOrderPayment(
-        order,
-        paymentSnapshots,
-        "cod",
-        discountAmount,
-        totalPayable,
-        reservation,
-        userId,
-        session
-      );
-
-      await session.commitTransaction();
-      session.endSession();
-
-      logger.info("COD order confirmed", { orderId: order._id });
-      return res.json({
-        ok: true,
-        order,
-        message: "Order confirmed as COD",
-      });
-    }
-
-    // Online payment gateway flow
-    if (["razorpay", "payu"].includes(method)) {
-      const gatewayPayment = new Payment({
-        order: order._id,
-        user: userId,
-        method,
-        amount: remaining,
-        currency: "INR",
-        gatewayPaymentId: null,
-        status: "created",
-        meta: {},
-        idempotencyKey,
-      });
-      await gatewayPayment.save({ session });
-
-      paymentSnapshots.push({
-        method,
-        amount: remaining,
-        gatewayPaymentId: null,
-        status: "created",
-        meta: {},
-      });
-
-      // Update order with payment info but don't finalize yet
-      order.payments = paymentSnapshots;
-      order.paymentMethod = method;
-      order.discountAmount = discountAmount;
-      order.total = totalPayable;
-      await order.save({ session });
-
-      // Link reservation to gateway payment
-      reservation.payment = gatewayPayment._id;
-      await reservation.save({ session });
-
-      await session.commitTransaction();
-      session.endSession();
-
-      // Call gateway outside transaction
-      const adapter = await getActiveGatewayAdapter();
-      const gatewayPayload = await adapter.createOrder({
-        amount: remaining,
-        currency: "INR",
-        receipt: `order_${order._id}`,
-        notes: {
-          orderId: order._id.toString(),
-          paymentId: gatewayPayment._id.toString(),
-          userId: userId.toString(),
-        },
-      });
-
-      // Update payment with gateway order ID if available
-      if (gatewayPayload.id) {
-        await Payment.findByIdAndUpdate(gatewayPayment._id, {
-          gatewayPaymentId: gatewayPayload.id,
-        });
-      }
-
-      logger.info("Gateway payment initiated", {
-        orderId: order._id,
-        paymentId: gatewayPayment._id,
-        gateway: method,
-      });
-
-      return res.json({
-        ok: true,
-        orderId: order._id,
-        paymentId: gatewayPayment._id,
-        gateway: gatewayPayload,
-      });
-    }
-
-    throw new Error("Unsupported payment method");
-  } catch (err) {
-    await session.abortTransaction();
-    session.endSession();
-
-    logger.error("Make payment failed", {
-      error: err.message,
+    res.json(result);
+  } catch (error) {
+    logger.error("Payment session creation failed", {
+      error: error.message,
       orderId: req.params.orderId,
       userId: req.user?._id,
     });
 
-    return res.status(400).json({
-      message: err.message || "Payment processing failed",
+    res.status(400).json({
+      message: error.message || "Payment session creation failed",
     });
   }
 };
 
 /**
- * Confirm Payment - Gateway callback handler
+ * Get Payment Status
  */
-export const confirmPayment = async (req, res) => {
-  const session = await mongoose.startSession();
+export const getPaymentStatus = async (req, res) => {
   try {
-    session.startTransaction();
+    const { sessionId } = req.params;
 
-    const { paymentId } = req.params;
-    const { gatewayPayload = {} } = req.body;
-
-    const payment = await Payment.findById(paymentId).session(session);
-    if (!payment) {
-      throw new Error("Payment not found");
-    }
-
-    if (payment.status === "success") {
-      await session.commitTransaction();
-      session.endSession();
-      return res.status(200).json(payment);
-    }
-
-    // Verify payment with gateway
-    const adapter = await getActiveGatewayAdapter();
-    const verification = await adapter.verifyPayment(gatewayPayload);
-
-    if (!verification.valid) {
-      throw new Error("Payment verification failed");
-    }
-
-    // Update payment status
-    validateStateTransition(payment.status, "success", PAYMENT_STATE_MACHINE);
-    payment.status = "success";
-    payment.gatewayPaymentId =
-      verification.gatewayPaymentId || payment.gatewayPaymentId;
-    payment.meta = {
-      ...payment.meta,
-      gatewayPayload: verification,
-      verifiedAt: new Date(),
-    };
-    await payment.save({ session });
-
-    // Get and update order
-    const order = await Order.findById(payment.order).session(session);
-    if (!order) {
-      throw new Error("Associated order not found");
-    }
-
-    // Update payment snapshot in order
-    const paymentSnapshot = order.payments.find(
-      (p) =>
-        p.method === payment.method &&
-        Math.abs(p.amount - payment.amount) < 0.01
-    );
-
-    if (paymentSnapshot) {
-      paymentSnapshot.status = "success";
-      paymentSnapshot.gatewayPaymentId = payment.gatewayPaymentId;
-    }
-
-    // Finalize order
-    await finalizeOrderPayment(
-      order,
-      order.payments,
-      payment.method,
-      order.discountAmount,
-      order.total,
-      null, // reservation will be found by paymentId
-      order.user,
-      session,
-      payment._id
-    );
-
-    await session.commitTransaction();
-    session.endSession();
-
-    logger.info("Payment confirmed successfully", {
-      paymentId,
-      orderId: order._id,
-    });
-
-    return res.json({
-      ok: true,
-      order,
-      payment,
-    });
-  } catch (err) {
-    await session.abortTransaction();
-    session.endSession();
-
-    logger.error("Payment confirmation failed", {
-      error: err.message,
-      paymentId: req.params.paymentId,
-    });
-
-    // Auto-handle failure
-    if (req.params.paymentId) {
-      await handlePaymentFailure(req.params.paymentId, "confirmation_failed");
-    }
-
-    return res.status(400).json({
-      message: err.message || "Payment confirmation failed",
-    });
+    const status = await paymentService.getPaymentStatus(sessionId);
+    res.json(status);
+  } catch (error) {
+    logger.error("Get payment status failed", { error: error.message });
+    res.status(400).json({ message: error.message });
   }
 };
 
-// ========== HELPER FUNCTIONS ==========
+/**
+ * Payment Webhook Handler
+ */
+export const paymentWebhook = async (req, res) => {
+  const gateway = req.params.gateway;
+  const payload = req.body;
 
-async function finalizeOrderPayment(
-  order,
-  paymentSnapshots,
-  paymentMethod,
-  discountAmount,
-  total,
-  reservation,
-  userId,
-  session,
-  paymentId = null
-) {
-  // Update order
-  order.payments = paymentSnapshots;
-  order.paymentMethod = paymentMethod;
-  order.discountAmount = discountAmount;
-  order.total = total;
-  validateStateTransition(order.status, "confirmed", ORDER_STATE_MACHINE);
-  order.status = "confirmed";
-  order.meta.paidAt = new Date();
-  await order.save({ session });
+  try {
+    logger.info("Payment webhook received", { gateway, payload });
 
-  // Consume stock reservation
-  if (reservation) {
-    await consumeStockReservation(order._id, reservation.payment, session);
-  } else if (paymentId) {
-    await consumeStockReservation(order._id, paymentId, session);
+    const adapter = await getActiveGatewayAdapter();
+    const verification = await adapter.verifyWebhook(payload);
+
+    if (!verification.valid) {
+      logger.warn("Invalid webhook signature", { gateway });
+      return res.status(400).json({ error: "Invalid signature" });
+    }
+
+    const sessionId =
+      payload.payload?.payment?.entity?.notes?.sessionId ||
+      payload.notes?.sessionId;
+
+    if (!sessionId) {
+      logger.error("Session ID not found in webhook", { gateway });
+      return res.status(400).json({ error: "Session ID not found" });
+    }
+
+    const event = payload.event || payload.status;
+
+    if (event === "payment.captured" || event === "success") {
+      await paymentService.processSuccessfulPayment(
+        verification.gatewayPaymentId,
+        sessionId,
+        payload
+      );
+    } else if (event === "payment.failed" || event === "failed") {
+      await paymentService.handlePaymentFailure(sessionId, "gateway_failure");
+    }
+
+    res.json({ received: true });
+  } catch (error) {
+    logger.error("Webhook processing failed", {
+      gateway,
+      error: error.message,
+      payload,
+    });
+
+    res.status(500).json({ error: "Webhook processing failed" });
   }
+};
 
-  // Clear user's cart
-  await Cart.updateOne(
-    { user: userId },
-    { $set: { items: [], totalValue: 0 } }
-  ).session(session);
-
-  logger.info("Order finalized", { orderId: order._id, paymentMethod });
-}
-
-// ========== ADDITIONAL CONTROLLER ACTIONS ==========
-
+/**
+ * Get Order
+ */
 export const getOrder = async (req, res) => {
   try {
     const { id } = req.params;
@@ -1302,6 +1311,9 @@ export const getOrder = async (req, res) => {
   }
 };
 
+/**
+ * List Orders
+ */
 export const listOrders = async (req, res) => {
   try {
     const { userId, page = 1, limit = 20, status } = req.query;
@@ -1323,6 +1335,9 @@ export const listOrders = async (req, res) => {
   }
 };
 
+/**
+ * Cancel Order
+ */
 export const cancelOrder = async (req, res) => {
   const session = await mongoose.startSession();
   try {
@@ -1370,7 +1385,6 @@ export const cancelOrder = async (req, res) => {
     }
 
     // Update order status
-    validateStateTransition(order.status, "cancelled", ORDER_STATE_MACHINE);
     order.status = "cancelled";
     order.meta.cancellation = {
       reason,
@@ -1397,5 +1411,71 @@ export const cancelOrder = async (req, res) => {
   }
 };
 
-// Export webhook handlers
-//  export { handlePaymentFailure, cleanupExpiredReservations, paymentWebhook };
+/**
+ * Cleanup Expired Reservations
+ */
+export const cleanupExpiredReservations = async () => {
+  const session = await mongoose.startSession();
+  try {
+    session.startTransaction();
+
+    const expiredReservations = await StockReservation.find({
+      status: "active",
+      reservedUntil: { $lt: new Date() },
+    }).session(session);
+
+    for (const reservation of expiredReservations) {
+      logger.info("Cleaning up expired reservation", {
+        reservationId: reservation._id,
+        orderId: reservation.order,
+      });
+
+      // Release stock
+      for (const it of reservation.items) {
+        await incrementVariantStock(it.variant, it.qty, session);
+      }
+
+      // Update reservation status
+      reservation.status = "expired";
+      await reservation.save({ session });
+
+      // Revert coupon usage if any
+      const order = await Order.findById(reservation.order).session(session);
+      if (order && order.coupon && order.coupon.couponId) {
+        await revertCouponReservation(order.coupon.couponId, null, session);
+      }
+
+      // Update order status
+      if (order && order.status === "pending") {
+        order.status = "failed";
+        order.meta.failureReason = "reservation_expired";
+        await order.save({ session });
+      }
+
+      logger.info("Expired reservation cleaned up", {
+        reservationId: reservation._id,
+      });
+    }
+
+    await session.commitTransaction();
+    session.endSession();
+
+    return { cleaned: expiredReservations.length };
+  } catch (error) {
+    await session.abortTransaction();
+    session.endSession();
+    logger.error("Reservation cleanup failed", { error: error.message });
+    throw error;
+  }
+};
+
+export default {
+  createOrder,
+  createPaymentSession,
+  getPaymentStatus,
+  paymentWebhook,
+  getOrder,
+  listOrders,
+  cancelOrder,
+  cleanupExpiredReservations,
+};
