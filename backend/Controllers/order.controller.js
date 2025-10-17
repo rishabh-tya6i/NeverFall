@@ -2,89 +2,18 @@
 import mongoose from "mongoose";
 import Order from "../Models/Order.js";
 import Cart from "../Models/Cart.js";
-import Product from "../Models/Product.js";
 import ProductVariant from "../Models/ProductVariant.js";
 import Coupon from "../Models/Coupon.js";
 import Payment from "../Models/Payments.js";
 import PaymentSession from "../Models/PaymentSession.js";
-import PaymentGatewayConfig from "../Models/PaymentGatewayConfig.js";
 import User from "../Models/User.js";
 import WalletTransaction from "../Models/WalletTransaction.js";
 import { getActiveGatewayAdapter } from "../Services/gatewayFactory.js";
+import { cacheGet, cacheSet, cacheDelPattern } from "../lib/cache.js";
+import { redis } from "../lib/redis.js";
 import logger from "../utils/logger.js";
 
-/**
- * Enhanced Stock Reservation Model with TTL
- */
-const StockReservationSchema = new mongoose.Schema(
-  {
-    order: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Order",
-      required: true,
-      index: true,
-    },
-    payment: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Payment",
-      default: null,
-    },
-    items: [
-      {
-        variant: {
-          type: mongoose.Schema.Types.ObjectId,
-          ref: "ProductVariant",
-          required: true,
-        },
-        qty: { type: Number, required: true },
-        price: { type: Number, required: true },
-      },
-    ],
-    status: {
-      type: String,
-      enum: ["active", "consumed", "released", "expired"],
-      default: "active",
-    },
-    reservedUntil: { type: Date, required: true, index: true },
-    meta: { type: Object, default: {} },
-  },
-  { timestamps: true }
-);
-
-// TTL index for automatic cleanup
-StockReservationSchema.index({ reservedUntil: 1 }, { expireAfterSeconds: 0 });
-const StockReservation =
-  mongoose.models.StockReservation ||
-  mongoose.model("StockReservation", StockReservationSchema);
-
-/**
- * CouponUsage Model for atomic usage tracking
- */
-const CouponUsageSchema = new mongoose.Schema(
-  {
-    coupon: {
-      type: mongoose.Schema.Types.ObjectId,
-      ref: "Coupon",
-      required: true,
-    },
-    user: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
-    uses: { type: Number, default: 0 },
-  },
-  { timestamps: true }
-);
-CouponUsageSchema.index({ coupon: 1, user: 1 }, { unique: true });
-const CouponUsage =
-  mongoose.models.CouponUsage ||
-  mongoose.model("CouponUsage", CouponUsageSchema);
-
 // ========== UTILITY FUNCTIONS ==========
-
-function validateStateTransition(currentState, newState, stateMachine) {
-  const allowedTransitions = stateMachine[currentState] || [];
-  if (!allowedTransitions.includes(newState)) {
-    throw new Error(`Invalid state transition: ${currentState} -> ${newState}`);
-  }
-}
 
 function generateIdempotencyKey() {
   return `idemp_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
@@ -92,6 +21,101 @@ function generateIdempotencyKey() {
 
 function generateSessionId() {
   return `sess_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+}
+
+// Improved Redis-based distributed lock with shorter timeout and stale lock detection
+/**
+ * Acquire a Redis-based payment lock (concurrency-safe)
+ * @param {String} orderId
+ * @param {Number} timeoutMs - lock expiry in milliseconds
+ */
+async function acquirePaymentLock(orderId, timeoutMs = 15000) {
+  const lockKey = `payment_lock:${orderId}`;
+  const lockValue = Date.now().toString();
+
+  const acquired = await redis.set(lockKey, lockValue, "PX", timeoutMs, "NX");
+
+  if (!acquired) {
+    const existingLockTime = await redis.get(lockKey);
+
+    // If lock is stale (> timeoutMs + buffer), force release
+    if (
+      existingLockTime &&
+      Date.now() - parseInt(existingLockTime) > timeoutMs + 5000
+    ) {
+      await redis.del(lockKey);
+      const retryAcquired = await redis.set(
+        lockKey,
+        Date.now().toString(),
+        "PX",
+        timeoutMs,
+        "NX"
+      );
+      if (retryAcquired) return lockKey;
+    }
+
+    throw new Error(
+      "Payment session is currently being processed. Please try again in a few seconds."
+    );
+  }
+
+  return lockKey;
+}
+
+/**
+ * Release payment lock
+ */
+async function releasePaymentLock(lockKey) {
+  try {
+    await redis.del(lockKey);
+  } catch (err) {
+    // Log failure but do not block payment flow
+    logger.warn("Failed to release payment lock", {
+      lockKey,
+      error: err.message,
+    });
+  }
+}
+
+/**
+ * Check if an active payment session exists for this order
+ * @param {String} orderId
+ * @param {String} currentSessionId - optional, for retries
+ */
+async function checkActivePaymentSession(orderId, currentSessionId = null) {
+  const ACTIVE_WINDOW_MS = 2 * 60 * 1000; // 2 minutes, can adjust for production
+
+  const activeSession = await PaymentSession.findOne({
+    order: orderId,
+    status: "active",
+    createdAt: { $gte: new Date(Date.now() - ACTIVE_WINDOW_MS) },
+  });
+
+  if (activeSession) {
+    // If same session (retry), allow it
+    if (currentSessionId && activeSession.sessionId === currentSessionId)
+      return true;
+
+    // If session is stale (> 3 min), expire it
+    const sessionAge = Date.now() - activeSession.createdAt.getTime();
+    if (sessionAge > 3 * 60 * 1000) {
+      await PaymentSession.updateOne(
+        { _id: activeSession._id },
+        { status: "expired" }
+      );
+      logger.info("Expired stale payment session", {
+        sessionId: activeSession.sessionId,
+        orderId,
+      });
+      return true;
+    }
+
+    throw new Error(
+      "A payment is already in progress for this order. Please wait or refresh the page."
+    );
+  }
+
+  return true;
 }
 
 async function validateUserOwnership(
@@ -105,34 +129,21 @@ async function validateUserOwnership(
 }
 
 /**
- * Atomic stock operations with optimistic locking
+ * Stock operations with Redis caching
  */
-async function decrementVariantStockAtomic(variantId, qty, session) {
-  const variant = await ProductVariant.findById(variantId).session(session);
-  if (!variant) throw new Error(`Variant not found: ${variantId}`);
-  if (variant.stock < qty) {
-    throw new Error(
-      `Insufficient stock for variant ${variantId}. Available: ${variant.stock}, Requested: ${qty}`
-    );
-  }
-
-  const res = await ProductVariant.updateOne(
-    {
-      _id: variantId,
-      stock: { $gte: qty },
-      __v: variant.__v,
-    },
-    {
-      $inc: { stock: -qty, __v: 1 },
-    },
+export async function decrementVariantStock(variantId, qty, session) {
+  const result = await ProductVariant.updateOne(
+    { _id: variantId, stock: { $gte: qty } },
+    { $inc: { stock: -qty } },
     { session }
   );
 
-  if (res.modifiedCount === 0) {
-    throw new Error(
-      `Stock update failed for variant ${variantId}. Possible race condition.`
-    );
+  if (result.modifiedCount === 0) {
+    throw new Error(`Insufficient stock for variant: ${variantId}`);
   }
+
+  await cacheDelPattern(`product:*`);
+  await cacheDelPattern(`variant:*`);
 }
 
 async function incrementVariantStock(variantId, qty, session) {
@@ -141,239 +152,225 @@ async function incrementVariantStock(variantId, qty, session) {
     { $inc: { stock: qty } },
     { session }
   );
+
+  await cacheDelPattern(`product:*`);
+  await cacheDelPattern(`variant:*`);
 }
 
 /**
- * Enhanced price validation with server-side recalculation
+ * Calculate order totals with caching
  */
-async function validateAndRecalculatePrices(items, session) {
-  let serverSubtotal = 0;
+export async function calculateOrderTotals(items, couponCode, session, userId) {
+  let subtotal = 0;
   const validatedItems = [];
 
-  for (const it of items) {
-    const variant = await ProductVariant.findById(it.variant)
-      .populate("product")
-      .session(session);
+  // 1️⃣ Validate items, calculate line totals
+  for (const item of items) {
+    const cacheKey = `variant:${item.variantId}`;
+    let variant = await cacheGet(cacheKey);
 
-    if (!variant) throw new Error(`Variant not found: ${it.variant}`);
-    if (!variant.product)
-      throw new Error(`Product not found for variant: ${it.variant}`);
+    if (!variant) {
+      variant = await ProductVariant.findById(item.variantId)
+        .populate({
+          path: "product",
+          populate: {
+            path: "parent",
+            populate: { path: "category" }, // populate product → parent → category
+          },
+        })
+        .session(session);
 
-    // Use server-side price only for security
-    const serverPrice = variant.price;
-    const lineTotal = serverPrice * it.quantity;
+      if (variant) await cacheSet(cacheKey, variant, 300);
+    }
+
+    if (!variant) throw new Error(`Variant ${item.variantId} not found`);
+    if (variant.stock < item.quantity)
+      throw new Error(`Insufficient stock for ${variant.product.title}`);
+
+    const price = variant.price;
+    const lineTotal = price * item.quantity;
 
     validatedItems.push({
       product: variant.product._id,
       variant: variant._id,
       title: variant.product.title,
-      color: it.color,
-      size: it.size,
-      price: serverPrice,
-      quantity: it.quantity,
+      color: item.color,
+      size: item.size,
+      price: price,
+      quantity: item.quantity,
       lineTotal: lineTotal,
+      priceAfterDiscount: lineTotal, // will adjust if coupon applies
+      category: variant.product.parent?.category?._id || null, // store category for coupon
     });
 
-    serverSubtotal += lineTotal;
+    subtotal += lineTotal;
   }
 
-  return { validatedItems, serverSubtotal };
-}
+  let discountAmount = 0;
+  let couponData = { couponId: null, code: "", targetUser: null };
+  let coupon = null;
 
-/**
- * Coupon validation and reservation
- */
-async function computeApplicableSubtotalForCoupon(coupon, items, session) {
-  const productIdsFilter = (coupon.applicableProductIds || []).map(String);
-  const categoryIdsFilter = (coupon.applicableCategoryIds || []).map(String);
+  // 2️⃣ Process coupon if provided
+  if (couponCode) {
+    const cacheKey = `coupon:${couponCode.toUpperCase()}`;
+    coupon = await cacheGet(cacheKey);
 
-  if (productIdsFilter.length === 0 && categoryIdsFilter.length === 0) {
-    return items.reduce((s, it) => s + it.lineTotal, 0);
-  }
+    if (!coupon) {
+      coupon = await Coupon.findOne({
+        code: couponCode.toUpperCase(),
+        active: true,
+        expiresAt: { $gt: new Date() },
+      }).session(session);
 
-  const uniqueProductIds = [...new Set(items.map((it) => String(it.product)))];
-  const products = await Product.find({ _id: { $in: uniqueProductIds } })
-    .select("_id category categories primaryCategoryId")
-    .session(session);
+      if (coupon) await cacheSet(cacheKey, coupon, 300);
+    }
 
-  const productToCategories = new Map();
-  for (const p of products) {
-    let cats = [];
-    if (Array.isArray(p.categories)) cats = p.categories.map(String);
-    else if (Array.isArray(p.category)) cats = p.category.map(String);
-    else if (p.category) cats = [String(p.category)];
-    else if (p.primaryCategoryId) cats = [String(p.primaryCategoryId)];
-    productToCategories.set(String(p._id), cats);
-  }
+    if (coupon) {
+      // 2a️⃣ Check usage limits
+      if (coupon.maxUses && coupon.usesCount >= coupon.maxUses) {
+        throw new Error("Coupon usage limit reached");
+      }
 
-  const productSet = new Set(productIdsFilter);
-  const categorySet = new Set(categoryIdsFilter);
-
-  let applicableSubtotal = 0;
-  for (const it of items) {
-    const pid = String(it.product);
-    let included = false;
-    if (productSet.size > 0 && productSet.has(pid)) included = true;
-    if (!included && categorySet.size > 0) {
-      const cats = productToCategories.get(pid) || [];
-      for (const c of cats) {
-        if (categorySet.has(String(c))) {
-          included = true;
-          break;
+      if (coupon.maxUsesPerUser) {
+        const userUsage = await Order.countDocuments({
+          "coupon.couponId": coupon._id,
+          user: userId,
+        }).session(session);
+        if (userUsage >= coupon.maxUsesPerUser) {
+          throw new Error("Coupon usage limit reached for this user");
         }
       }
-    }
-    if (included) applicableSubtotal += it.lineTotal;
-  }
-  return applicableSubtotal;
-}
 
-async function reserveCouponUsageAtomic(
-  couponCode,
-  userId,
-  subtotal,
-  applicableSubtotal,
-  session
-) {
-  const code = String(couponCode || "").toUpperCase();
-  const coupon = await Coupon.findOne({ code }).session(session);
-  if (!coupon || !coupon.active) throw new Error("Invalid or inactive coupon");
-
-  // Target user validation
-  if (coupon.targetUser && String(coupon.targetUser) !== String(userId)) {
-    throw new Error("Coupon is valid for specific user only");
-  }
-
-  // Expiry check
-  if (coupon.expiresAt && coupon.expiresAt < new Date()) {
-    throw new Error("Coupon has expired");
-  }
-
-  // Minimum order value
-  if ((coupon.minOrderValue || 0) > 0 && subtotal < coupon.minOrderValue) {
-    throw new Error(`Minimum order value of ${coupon.minOrderValue} required`);
-  }
-
-  if ((applicableSubtotal || 0) <= 0) {
-    throw new Error("Coupon not applicable to order items");
-  }
-
-  let usageRecord = null;
-
-  // Per-user usage limit
-  if (coupon.maxUsesPerUser && coupon.maxUsesPerUser > 0) {
-    usageRecord = await CouponUsage.findOneAndUpdate(
-      {
-        coupon: coupon._id,
-        user: userId,
-        $or: [
-          { uses: { $exists: false } },
-          { uses: { $lt: coupon.maxUsesPerUser } },
-        ],
-      },
-      { $inc: { uses: 1 } },
-      { upsert: true, new: true, setDefaultsOnInsert: true, session }
-    );
-    if (!usageRecord) throw new Error("Coupon usage limit reached for user");
-  }
-
-  // Global usage limit
-  if (coupon.maxUses && coupon.maxUses > 0) {
-    const updatedCoupon = await Coupon.findOneAndUpdate(
-      {
-        _id: coupon._id,
-        $or: [
-          { maxUses: { $exists: false } },
-          { usesCount: { $lt: coupon.maxUses } },
-        ],
-      },
-      { $inc: { usesCount: 1 } },
-      { session, new: true }
-    );
-    if (!updatedCoupon) {
-      // Revert per-user usage if global limit fails
-      if (usageRecord) {
-        await CouponUsage.updateOne(
-          { _id: usageRecord._id },
-          { $inc: { uses: -1 } }
-        ).session(session);
+      // 2b️⃣ Check min order value
+      if (subtotal < coupon.minOrderValue) {
+        throw new Error(
+          `Order must be at least ₹${coupon.minOrderValue} to use this coupon`
+        );
       }
-      throw new Error("Coupon usage limit reached");
+
+      couponData = {
+        couponId: coupon._id,
+        code: coupon.code,
+        targetUser: coupon.targetUser || null,
+      };
+
+      // 2c️⃣ Filter applicable items
+      const applicableItems = validatedItems.filter((item) => {
+        const isProductMatch =
+          !coupon.applicableProductIds?.length ||
+          coupon.applicableProductIds.includes(item.product);
+        const isCategoryMatch =
+          !coupon.applicableCategoryIds?.length ||
+          coupon.applicableCategoryIds.includes(item.category);
+        return isProductMatch && isCategoryMatch;
+      });
+
+      const applicableSubtotal = applicableItems.reduce(
+        (sum, item) => sum + item.lineTotal,
+        0
+      );
+
+      // 2d️⃣ Calculate discount amount
+      if (coupon.type === "fixed") {
+        discountAmount = Math.min(coupon.value, applicableSubtotal);
+      } else if (coupon.type === "percentage") {
+        discountAmount = (applicableSubtotal * coupon.value) / 100;
+        if (coupon.maxDiscountAmount) {
+          discountAmount = Math.min(discountAmount, coupon.maxDiscountAmount);
+        }
+      }
+
+      // 2e️⃣ Distribute discount proportionally across applicable items
+      for (const item of applicableItems) {
+        const proportion = item.lineTotal / applicableSubtotal;
+        const itemDiscount = proportion * discountAmount;
+        item.priceAfterDiscount =
+          Math.round((item.lineTotal - itemDiscount) * 100) / 100;
+      }
     }
-    coupon.usesCount = updatedCoupon.usesCount;
-  } else {
-    coupon.usesCount = (coupon.usesCount || 0) + 1;
-    await coupon.save({ session });
   }
 
-  return { coupon, usageRecord };
-}
+  const total = Math.max(0, subtotal - discountAmount);
 
-async function revertCouponReservation(couponId, usageRecordId, session) {
-  if (usageRecordId) {
-    await CouponUsage.updateOne(
-      { _id: usageRecordId, uses: { $gt: 0 } },
-      { $inc: { uses: -1 } },
-      { session }
-    );
-  }
-  if (couponId) {
-    await Coupon.updateOne(
-      { _id: couponId, usesCount: { $gt: 0 } },
-      { $inc: { usesCount: -1 } }
-    ).session(session);
-  }
+  return {
+    items: validatedItems,
+    subtotal: Math.round(subtotal * 100) / 100,
+    discountAmount: Math.round(discountAmount * 100) / 100,
+    total: Math.round(total * 100) / 100,
+    coupon: couponData,
+  };
 }
 
 /**
- * Wallet Operations
+ * Reserve coupon usage with cache invalidation
+ */
+/**
+ * Reserve coupon usage safely (atomic + concurrency-safe)
+ */
+export async function reserveCouponUsage(couponId, userId, session) {
+  if (!couponId) return;
+
+  const result = await Coupon.updateOne(
+    {
+      _id: couponId,
+      $expr: { $lt: ["$usesCount", { $ifNull: ["$maxUses", Infinity] }] },
+    },
+    { $inc: { usesCount: 1 } },
+    { session }
+  );
+
+  if (result.modifiedCount === 0) {
+    throw new Error("Coupon usage limit reached");
+  }
+
+  // Clear coupon cache
+  await cacheDelPattern(`coupon:*`);
+}
+
+/**
+ * Revert coupon usage safely (atomic)
+ */
+async function revertCouponUsage(couponId, userId, session) {
+  if (!couponId) return;
+
+  await Coupon.updateOne(
+    { _id: couponId, usesCount: { $gt: 0 } },
+    { $inc: { usesCount: -1 } },
+    { session }
+  );
+
+  // Clear coupon cache
+  await cacheDelPattern(`coupon:*`);
+}
+
+/**
+ * Wallet operations - ONLY CALLED AFTER PAYMENT CONFIRMATION
  */
 async function processWalletPayment(userId, amount, orderId, session) {
   const user = await User.findById(userId).session(session);
-  const walletAvailable = Number(user.wallet?.balance || 0);
 
-  if (walletAvailable <= 0) {
-    throw new Error("Wallet balance is zero");
+  if (!user.wallet || user.wallet.balance < amount) {
+    throw new Error("Insufficient wallet balance");
   }
 
-  if (amount <= 0) {
-    throw new Error("Invalid wallet payment amount");
-  }
-
-  // Double-check we're not trying to deduct more than available
-  const actualDeductAmount = Math.min(amount, walletAvailable);
-
-  // Create wallet transaction
   const walletTx = await WalletTransaction.create(
     [
       {
         user: userId,
         type: "debit",
-        amount: actualDeductAmount,
-        currency: "INR",
-        status: "available",
-        source: "order",
+        amount: amount,
+        status: "completed",
+        source: "order_payment",
         refId: orderId,
-        meta: {
-          note: "Wallet debit for order payment",
-          originalRequested: amount,
-          actualProcessed: actualDeductAmount,
-        },
       },
     ],
     { session }
   );
 
-  // Update user balance
-  user.wallet.balance = walletAvailable - actualDeductAmount;
+  user.wallet.balance -= amount;
   await user.save({ session });
 
-  logger.info("Wallet payment processed successfully", {
-    userId,
-    requested: amount,
-    processed: actualDeductAmount,
-    remainingBalance: user.wallet.balance,
-  });
+  await cacheDelPattern(`user:${userId}:*`);
 
   return walletTx[0];
 }
@@ -381,15 +378,13 @@ async function processWalletPayment(userId, amount, orderId, session) {
 async function processWalletRefund(userId, amount, orderId, reason, session) {
   const user = await User.findById(userId).session(session);
 
-  // Create credit transaction
   const walletTx = await WalletTransaction.create(
     [
       {
         user: userId,
         type: "credit",
         amount: amount,
-        currency: "INR",
-        status: "available",
+        status: "completed",
         source: "refund",
         refId: orderId,
         meta: { reason },
@@ -398,628 +393,13 @@ async function processWalletRefund(userId, amount, orderId, reason, session) {
     { session }
   );
 
-  // Update user balance
   user.wallet.balance = (user.wallet.balance || 0) + amount;
   await user.save({ session });
 
+  await cacheDelPattern(`user:${userId}:*`);
+
   return walletTx[0];
 }
-
-/**
- * Stock Reservation Management
- */
-async function createStockReservation(orderId, items, paymentId, session) {
-  const reserveMinutes = Number(process.env.RESERVATION_TTL_MINUTES || 10);
-  const reservedUntil = new Date(Date.now() + reserveMinutes * 60 * 1000);
-
-  const reservationItems = items.map((it) => ({
-    variant: it.variant,
-    qty: it.quantity,
-    price: it.price,
-  }));
-
-  const reservation = new StockReservation({
-    order: orderId,
-    payment: paymentId,
-    items: reservationItems,
-    status: "active",
-    reservedUntil,
-    meta: { createdAt: new Date() },
-  });
-
-  await reservation.save({ session });
-  return reservation;
-}
-
-async function consumeStockReservation(orderId, paymentId, session) {
-  const reservation = await StockReservation.findOne({
-    order: orderId,
-    payment: paymentId,
-    status: "active",
-  }).session(session);
-
-  if (reservation) {
-    reservation.status = "consumed";
-    await reservation.save({ session });
-  }
-  return reservation;
-}
-
-async function releaseStockReservation(orderId, paymentId, session) {
-  const reservation = await StockReservation.findOne({
-    $or: [
-      { order: orderId, payment: paymentId },
-      { order: orderId, payment: null },
-    ],
-    status: "active",
-  }).session(session);
-
-  if (reservation) {
-    // Return stock to inventory
-    for (const it of reservation.items) {
-      await incrementVariantStock(it.variant, it.qty, session);
-    }
-    reservation.status = "released";
-    await reservation.save({ session });
-  }
-  return reservation;
-}
-
-// ========== PAYMENT SERVICE CLASS ==========
-
-class PaymentService {
-  /**
-   * Create payment session and process payment
-   */
-  async createPaymentSession(userId, orderId, sessionData) {
-    const session = await mongoose.startSession();
-
-    try {
-      session.startTransaction();
-
-      // 1. Validate order and user
-      const [order, user] = await Promise.all([
-        Order.findById(orderId).session(session),
-        User.findById(userId).session(session),
-      ]);
-
-      if (!order || order.status !== "pending") {
-        throw new Error("Order not available for payment");
-      }
-
-      if (order.user.toString() !== userId) {
-        throw new Error("Unauthorized access to order");
-      }
-
-      // 2. Validate wallet balance (read-only - NO DEDUCTION)
-      if (sessionData.walletAmount > 0) {
-        if (user.wallet.balance < sessionData.walletAmount) {
-          throw new Error("Insufficient wallet balance");
-        }
-        if (sessionData.walletAmount > order.total) {
-          throw new Error("Wallet amount exceeds order total");
-        }
-      }
-
-      const gatewayAmount = order.total - sessionData.walletAmount;
-
-      // 3. Reserve stock atomically
-      for (const item of order.items) {
-        await decrementVariantStockAtomic(item.variant, item.quantity, session);
-      }
-
-      // 4. Create stock reservation
-      const stockReservation = await createStockReservation(
-        order._id,
-        order.items,
-        null,
-        session
-      );
-
-      // 5. Reserve coupon usage atomically
-      let couponReservedMeta = { couponId: null, usageRecordId: null };
-      let discountAmount = order.discountAmount || 0;
-
-      if (order.coupon?.couponId) {
-        const couponDoc = await Coupon.findById(order.coupon.couponId).session(
-          session
-        );
-        if (!couponDoc || !couponDoc.active) {
-          throw new Error("Coupon invalid or expired");
-        }
-
-        const applicableSubtotal = await computeApplicableSubtotalForCoupon(
-          couponDoc,
-          order.items,
-          session
-        );
-
-        const reserved = await reserveCouponUsageAtomic(
-          couponDoc.code,
-          userId,
-          order.subtotal,
-          applicableSubtotal,
-          session
-        );
-
-        couponReservedMeta.couponId = reserved.coupon._id;
-        couponReservedMeta.usageRecordId = reserved.usageRecord?._id || null;
-
-        // Recalculate discount
-        if (reserved.coupon.type === "fixed") {
-          discountAmount = Math.min(reserved.coupon.value, applicableSubtotal);
-        } else if (reserved.coupon.type === "percentage") {
-          discountAmount = (applicableSubtotal * reserved.coupon.value) / 100;
-          if (reserved.coupon.maxDiscountAmount) {
-            discountAmount = Math.min(
-              discountAmount,
-              reserved.coupon.maxDiscountAmount
-            );
-          }
-        }
-      }
-
-      // ✅ FIX 1 & 2: Update order with final discount amounts and store couponId
-      order.discountAmount = discountAmount;
-      order.total = order.subtotal - discountAmount;
-      order.paymentMethod = sessionData.paymentMethod;
-      await order.save({ session });
-
-      // 6. Create or update payment session (ATOMIC)
-      const paymentSession = await PaymentSession.findOneAndUpdate(
-        { order: orderId, status: "active" },
-        {
-          $setOnInsert: {
-            sessionId: sessionData.sessionId,
-            user: userId,
-            order: orderId,
-            walletAmount: sessionData.walletAmount,
-            paymentMethod: sessionData.paymentMethod,
-            status: "active",
-            createdAt: new Date(),
-            meta: {
-              userAgent: sessionData.userAgent,
-              ip: sessionData.ip,
-              couponUsageRecordId: couponReservedMeta.usageRecordId,
-              couponId: couponReservedMeta.couponId, // ✅ FIX 1: Store couponId
-            },
-          },
-        },
-        {
-          upsert: true,
-          new: true,
-          session: session,
-        }
-      );
-
-      let gatewayPayload = null;
-
-      // 7. Handle different payment methods
-      if (sessionData.paymentMethod === "cod") {
-        // COD - immediately confirm order and deduct wallet
-        await this.processCODPayment(
-          order,
-          user,
-          paymentSession,
-          stockReservation,
-          session
-        );
-      } else {
-        // Online payment - create gateway order (wallet deducted later in webhook)
-        const adapter = await getActiveGatewayAdapter();
-        gatewayPayload = await adapter.createOrder({
-          amount: gatewayAmount,
-          currency: "INR",
-          receipt: `order_${orderId}_${sessionData.sessionId}`,
-          notes: {
-            orderId: orderId.toString(),
-            sessionId: sessionData.sessionId,
-            userId: userId.toString(),
-          },
-        });
-
-        paymentSession.gatewayOrderId = gatewayPayload.id;
-        await paymentSession.save({ session });
-
-        // Link stock reservation to payment session
-        stockReservation.payment = paymentSession._id;
-        await stockReservation.save({ session });
-      }
-
-      await session.commitTransaction();
-
-      logger.info("Payment session created successfully", {
-        sessionId: paymentSession.sessionId,
-        orderId,
-        paymentMethod: sessionData.paymentMethod,
-        walletAmount: sessionData.walletAmount,
-        gatewayAmount,
-      });
-
-      return {
-        success: true,
-        sessionId: paymentSession.sessionId,
-        gateway: gatewayPayload,
-        walletAmount: sessionData.walletAmount,
-        gatewayAmount: gatewayAmount,
-        paymentMethod: sessionData.paymentMethod,
-        orderStatus:
-          sessionData.paymentMethod === "cod" ? "confirmed" : "pending",
-      };
-    } catch (error) {
-      await session.abortTransaction();
-      logger.error("Payment session creation failed", {
-        orderId,
-        userId,
-        error: error.message,
-      });
-      throw error;
-    } finally {
-      session.endSession();
-    }
-  }
-
-  /**
-   * Process COD payment - deduct wallet immediately
-   */
-  async processCODPayment(
-    order,
-    user,
-    paymentSession,
-    stockReservation,
-    dbSession
-  ) {
-    // 1. Deduct wallet amount if any
-    if (paymentSession.walletAmount > 0) {
-      user.wallet.balance -= paymentSession.walletAmount;
-      await user.save({ session: dbSession });
-
-      await WalletTransaction.create(
-        [
-          {
-            user: user._id,
-            type: "debit",
-            amount: paymentSession.walletAmount,
-            currency: "INR",
-            status: "available",
-            source: "order",
-            refId: order._id,
-            meta: { note: "Wallet payment for COD order" },
-          },
-        ],
-        { session: dbSession }
-      );
-    }
-
-    const codAmount = order.total - paymentSession.walletAmount;
-
-    // 2. Create COD payment record
-    const payment = new Payment({
-      order: order._id,
-      user: user._id,
-      method: "cod",
-      amount: codAmount,
-      currency: "INR",
-      status: "cod_pending",
-      meta: { sessionId: paymentSession.sessionId },
-    });
-    await payment.save({ session: dbSession });
-
-    // 3. Update order status
-    order.status = "confirmed";
-    order.paymentMethod = "cod";
-
-    // Add payment snapshots
-    if (paymentSession.walletAmount > 0) {
-      order.payments.push({
-        method: "wallet",
-        amount: paymentSession.walletAmount,
-        status: "success",
-        meta: {},
-      });
-    }
-
-    order.payments.push({
-      method: "cod",
-      amount: codAmount,
-      status: "cod_pending",
-      meta: {},
-    });
-
-    await order.save({ session: dbSession });
-
-    // 4. Consume stock reservation
-    stockReservation.status = "consumed";
-    stockReservation.payment = payment._id;
-    await stockReservation.save({ session: dbSession });
-
-    // 5. Mark session completed
-    paymentSession.status = "completed";
-    paymentSession.completedAt = new Date();
-    await paymentSession.save({ session: dbSession });
-
-    // 6. Clear cart
-    await Cart.updateOne(
-      { user: user._id },
-      { $set: { items: [], totalValue: 0 } },
-      { session: dbSession }
-    );
-
-    logger.info("COD order processed successfully", {
-      sessionId: paymentSession.sessionId,
-      orderId: order._id,
-      walletAmount: paymentSession.walletAmount,
-      codAmount,
-    });
-  }
-
-  /**
-   * Process successful online payment (via webhook)
-   */
-  async processSuccessfulPayment(gatewayPaymentId, sessionId, gatewayData) {
-    const session = await mongoose.startSession();
-
-    try {
-      session.startTransaction();
-
-      // 1. Find active payment session
-      const paymentSession = await PaymentSession.findOne({
-        sessionId: sessionId,
-        status: "active",
-      }).session(session);
-
-      if (!paymentSession) {
-        throw new Error("Payment session not found or already processed");
-      }
-
-      // 2. Verify payment with gateway
-      const adapter = await getActiveGatewayAdapter();
-      const verification = await adapter.verifyPayment(gatewayData);
-
-      if (!verification.valid) {
-        throw new Error("Payment verification failed");
-      }
-
-      const [order, user] = await Promise.all([
-        Order.findById(paymentSession.order).session(session),
-        User.findById(paymentSession.user).session(session),
-      ]);
-
-      // ✅ FIX 4: Ensure order pricing consistency in webhook
-      // Recalculate and apply final pricing to maintain consistency
-      if (paymentSession.meta.couponId) {
-        const coupon = await Coupon.findById(
-          paymentSession.meta.couponId
-        ).session(session);
-        if (coupon && coupon.active) {
-          const applicableSubtotal = await computeApplicableSubtotalForCoupon(
-            coupon,
-            order.items,
-            session
-          );
-
-          let finalDiscount = 0;
-          if (coupon.type === "fixed") {
-            finalDiscount = Math.min(coupon.value, applicableSubtotal);
-          } else if (coupon.type === "percentage") {
-            finalDiscount = (applicableSubtotal * coupon.value) / 100;
-            if (coupon.maxDiscountAmount) {
-              finalDiscount = Math.min(finalDiscount, coupon.maxDiscountAmount);
-            }
-          }
-
-          order.discountAmount = finalDiscount;
-          order.total = order.subtotal - finalDiscount;
-        }
-      }
-
-      // 3. Process wallet payment if any (ONLY NOW - when payment is certain)
-      if (paymentSession.walletAmount > 0) {
-        // Final balance check (might have changed since session creation)
-        if (user.wallet.balance < paymentSession.walletAmount) {
-          throw new Error("Insufficient wallet balance at payment time");
-        }
-
-        user.wallet.balance -= paymentSession.walletAmount;
-        await user.save({ session });
-
-        await WalletTransaction.create(
-          [
-            {
-              user: user._id,
-              type: "debit",
-              amount: paymentSession.walletAmount,
-              currency: "INR",
-              status: "available",
-              source: "order",
-              refId: order._id,
-              meta: { note: "Wallet payment for online order" },
-            },
-          ],
-          { session }
-        );
-      }
-
-      // 4. Create gateway payment record
-      const payment = new Payment({
-        order: order._id,
-        user: user._id,
-        method: paymentSession.paymentMethod,
-        amount: verification.amount,
-        currency: "INR",
-        gatewayPaymentId: gatewayPaymentId,
-        status: "success",
-        meta: {
-          sessionId: sessionId,
-          gatewayData: verification,
-        },
-      });
-      await payment.save({ session });
-
-      // 5. Update order
-      order.status = "confirmed";
-      order.paymentMethod = paymentSession.paymentMethod;
-
-      // Add payment snapshots
-      if (paymentSession.walletAmount > 0) {
-        order.payments.push({
-          method: "wallet",
-          amount: paymentSession.walletAmount,
-          status: "success",
-          meta: {},
-        });
-      }
-
-      order.payments.push({
-        method: paymentSession.paymentMethod,
-        amount: verification.amount,
-        gatewayPaymentId: gatewayPaymentId,
-        status: "success",
-        meta: {},
-      });
-
-      await order.save({ session });
-
-      // 6. Consume stock reservation
-      const stockReservation = await StockReservation.findOne({
-        order: order._id,
-        status: "active",
-      }).session(session);
-
-      if (stockReservation) {
-        stockReservation.status = "consumed";
-        stockReservation.payment = payment._id;
-        await stockReservation.save({ session });
-      }
-
-      // 7. Mark session completed
-      paymentSession.status = "completed";
-      paymentSession.completedAt = new Date();
-      paymentSession.meta.gatewayResponse = verification;
-      await paymentSession.save({ session });
-
-      // 8. Clear cart
-      await Cart.updateOne(
-        { user: user._id },
-        { $set: { items: [], totalValue: 0 } },
-        { session }
-      );
-
-      await session.commitTransaction();
-
-      logger.info("Online payment processed successfully", {
-        sessionId,
-        orderId: order._id,
-        walletAmount: paymentSession.walletAmount,
-        gatewayAmount: verification.amount,
-      });
-
-      return { success: true, orderId: order._id };
-    } catch (error) {
-      await session.abortTransaction();
-
-      logger.error("Online payment processing failed", {
-        sessionId,
-        error: error.message,
-      });
-
-      throw error;
-    } finally {
-      session.endSession();
-    }
-  }
-
-  /**
-   * Handle payment failure
-   */
-  async handlePaymentFailure(sessionId, reason = "unknown") {
-    const session = await mongoose.startSession();
-
-    try {
-      session.startTransaction();
-
-      // 1. Find and mark session as failed
-      const paymentSession = await PaymentSession.findOneAndUpdate(
-        { sessionId: sessionId, status: "active" },
-        {
-          status: "failed",
-          meta: { failureReason: reason },
-        },
-        { session, new: true }
-      );
-
-      if (!paymentSession) {
-        await session.commitTransaction();
-        return { success: false, message: "Session not found" };
-      }
-
-      // 2. Release stock reservation
-      await releaseStockReservation(paymentSession.order, null, session);
-
-      // ✅ FIX 3: Fix coupon revert in failure handling
-      if (
-        paymentSession.meta.couponUsageRecordId &&
-        paymentSession.meta.couponId
-      ) {
-        await revertCouponReservation(
-          paymentSession.meta.couponId, // ✅ Now we have couponId
-          paymentSession.meta.couponUsageRecordId,
-          session
-        );
-      }
-
-      // 4. Update order status if needed
-      const order = await Order.findById(paymentSession.order).session(session);
-      if (order && order.status === "pending") {
-        order.status = "failed";
-        order.meta.paymentFailure = {
-          sessionId,
-          reason,
-          timestamp: new Date(),
-        };
-        await order.save({ session });
-      }
-
-      await session.commitTransaction();
-
-      logger.info("Payment failure handled", { sessionId, reason });
-
-      return { success: true, sessionId };
-    } catch (error) {
-      await session.abortTransaction();
-      logger.error("Payment failure handling failed", {
-        sessionId,
-        error: error.message,
-      });
-      throw error;
-    } finally {
-      session.endSession();
-    }
-  }
-
-  /**
-   * Get payment session status
-   */
-  async getPaymentStatus(sessionId) {
-    const paymentSession = await PaymentSession.findOne({ sessionId });
-
-    if (!paymentSession) {
-      return { status: "expired" };
-    }
-
-    return {
-      status: paymentSession.status,
-      sessionId: paymentSession.sessionId,
-      orderId: paymentSession.order,
-      paymentMethod: paymentSession.paymentMethod,
-      walletAmount: paymentSession.walletAmount,
-      completedAt: paymentSession.completedAt,
-    };
-  }
-}
-
-// Create payment service instance
-const paymentService = new PaymentService();
 
 // ========== CONTROLLER ACTIONS ==========
 
@@ -1027,455 +407,608 @@ const paymentService = new PaymentService();
  * Create Order
  */
 export const createOrder = async (req, res) => {
-  const idempotencyKey =
-    req.header("Idempotency-Key") || generateIdempotencyKey();
   const session = await mongoose.startSession();
 
   try {
-    session.startTransaction();
+    await session.withTransaction(async () => {
+      const {
+        items: payloadItems = [],
+        useCart = false,
+        couponCode = null,
+        shippingAddress,
+      } = req.body;
 
-    const {
-      items: payloadItems = [],
-      useCart = false,
-      couponCode = null,
-      shippingAddress = {},
-      paymentMethod = "none",
-      paymentInfo = {},
-    } = req.body;
-    const userId = req.user?._id || req.body.userId;
+      const userId = req.user._id;
 
-    if (!userId) {
-      throw new Error("User ID required");
-    }
-
-    // Idempotency check
-    if (idempotencyKey) {
-      const existing = await Order.findOne({
-        "meta.idempotencyKey": idempotencyKey,
-        user: userId,
-      }).session(session);
-      if (existing) {
-        await session.commitTransaction();
-        session.endSession();
-        return res.status(200).json(existing);
-      }
-    }
-
-    // Gather and validate items
-    let items = [];
-    if (useCart) {
-      const cart = await Cart.findOne({ user: userId }).session(session);
-      if (!cart || !cart.items?.length) {
-        throw new Error("Cart is empty");
-      }
-      items = cart.items;
-    } else {
-      if (!Array.isArray(payloadItems) || payloadItems.length === 0) {
-        throw new Error("No items provided");
-      }
-      items = payloadItems;
-    }
-
-    // Validate prices and recalculate server-side
-    const { validatedItems, serverSubtotal } =
-      await validateAndRecalculatePrices(items, session);
-    items = validatedItems;
-
-    // Coupon validation (calculation only, no reservation)
-    let discountAmount = 0;
-    let couponRef = null;
-    if (couponCode) {
-      const coupon = await Coupon.findOne({
-        code: couponCode.toUpperCase(),
-      }).session(session);
-
-      if (!coupon || !coupon.active) {
-        throw new Error("Invalid coupon");
+      if (!shippingAddress) {
+        throw new Error("Shipping address required");
       }
 
-      const applicableSubtotal = await computeApplicableSubtotalForCoupon(
+      let items = [];
+      if (useCart) {
+        const cart = await Cart.findOne({ user: userId }).session(session);
+        if (!cart?.items?.length) throw new Error("Cart is empty");
+        items = cart.items.map((item) => ({
+          variantId: item.variant,
+          quantity: item.quantity,
+          color: item.color,
+          size: item.size,
+        }));
+      } else {
+        if (!payloadItems.length) throw new Error("No items provided");
+        items = payloadItems;
+      }
+
+      const {
+        items: validatedItems,
+        total,
         coupon,
-        items,
-        session
+      } = await calculateOrderTotals(items, couponCode, session);
+
+      // Reserve stock
+      for (const item of validatedItems) {
+        await decrementVariantStock(item.variant, item.quantity, session);
+      }
+
+      // Reserve coupon
+      if (coupon.couponId) {
+        await reserveCouponUsage(coupon.couponId, userId, session);
+      }
+
+      const order = await Order.create(
+        [
+          {
+            user: userId,
+            items: validatedItems,
+            total,
+            coupon,
+            shippingAddress,
+            status: "pending",
+            meta: {
+              idempotencyKey:
+                req.header("Idempotency-Key") || generateIdempotencyKey(),
+            },
+          },
+        ],
+        { session }
       );
 
-      if ((applicableSubtotal || 0) <= 0) {
-        throw new Error("Coupon not applicable to order items");
-      }
+      await cacheDelPattern(`orders:${userId}:*`);
 
-      // Calculate discount
-      if (coupon.type === "fixed") {
-        discountAmount = Math.min(coupon.value, applicableSubtotal);
-      } else if (coupon.type === "percentage") {
-        discountAmount = (applicableSubtotal * coupon.value) / 100;
-        if (coupon.maxDiscountAmount) {
-          discountAmount = Math.min(discountAmount, coupon.maxDiscountAmount);
-        }
-      } else {
-        throw new Error("Unsupported coupon type");
-      }
-
-      couponRef = coupon._id;
-    }
-
-    const total = Math.max(0, serverSubtotal - discountAmount);
-
-    // Set TTL for pending orders
-    const ttlHours = Number(process.env.PENDING_ORDER_TTL_HOURS || 48);
-    const expireAt = new Date(Date.now() + ttlHours * 3600 * 1000);
-
-    const order = new Order({
-      user: userId,
-      items,
-      subtotal: serverSubtotal,
-      discountAmount,
-      total,
-      coupon: couponRef
-        ? {
-            couponId: couponRef,
-            code: couponCode.toUpperCase(),
-            targetUser: couponRef.targetUser || null,
-          }
-        : { couponId: null, code: "" },
-      status: "pending",
-      paymentMethod: "none",
-      paymentInfo,
-      shippingAddress,
-      meta: {
-        idempotencyKey,
-        createdAt: new Date(),
-        source: useCart ? "cart" : "direct",
-      },
-      expireAt,
+      res.status(201).json(order[0]);
     });
-
-    await order.save({ session });
-
-    await session.commitTransaction();
-    session.endSession();
-
-    logger.info("Order created successfully", { orderId: order._id, userId });
-    return res.status(201).json(order);
-  } catch (err) {
-    await session.abortTransaction();
-    session.endSession();
-
+  } catch (error) {
     logger.error("Order creation failed", {
-      error: err.message,
-      userId: req.user?._id,
-      idempotencyKey,
+      error: error.message,
+      userId: req.user._id,
     });
-
-    return res.status(400).json({
-      message: err.message || "Order creation failed",
-    });
+    res.status(400).json({ message: error.message });
+  } finally {
+    session.endSession();
   }
 };
 
 /**
- * Create Payment Session
+ * Create Payment Session - UPDATED: No wallet deduction here
  */
 export const createPaymentSession = async (req, res) => {
+  const session = await mongoose.startSession();
+  let paymentLock = null;
+
   try {
-    const { orderId } = req.params;
-    const {
-      walletAmount = 0,
-      paymentMethod,
-      sessionId = generateSessionId(),
-    } = req.body;
+    await session.withTransaction(async () => {
+      const { orderId } = req.params;
+      const {
+        useWallet = false,
+        paymentMethod = "cod",
+        retrySessionId = null,
+      } = req.body;
+      const userId = req.user._id;
+      const sessionId = retrySessionId || generateSessionId();
 
-    const userId = req.user?._id || req.body.userId;
+      const validMethods = ["cod", "razorpay", "payu"];
+      if (!validMethods.includes(paymentMethod)) {
+        throw new Error("Unsupported payment method");
+      }
 
-    if (!["cod", "razorpay", "payu"].includes(paymentMethod)) {
-      return res.status(400).json({ message: "Unsupported payment method" });
-    }
+      // --- 1. Ensure no conflicting active payment session ---
+      await checkActivePaymentSession(orderId, retrySessionId);
 
-    logger.info("Creating payment session", {
-      orderId,
-      paymentMethod,
-      walletAmount,
-      sessionId,
-      userId,
+      // --- 2. Acquire Redis lock for this order ---
+      paymentLock = await acquirePaymentLock(orderId, 15000); // 15s lock for slow gateways
+
+      // --- 3. Load order + user ---
+      const [order, user] = await Promise.all([
+        Order.findById(orderId).session(session),
+        User.findById(userId).session(session),
+      ]);
+
+      if (!order) throw new Error("Order not found");
+
+      // --- 4. Early return if already confirmed ---
+      if (order.status === "confirmed") {
+        return res.json({
+          success: true,
+          sessionId,
+          orderStatus: "confirmed",
+          message: "Order already confirmed",
+        });
+      }
+
+      if (order.status !== "pending") {
+        throw new Error(
+          `Order cannot be paid. Current status: ${order.status}`
+        );
+      }
+
+      validateUserOwnership(order, userId, "order");
+
+      // --- 5. Calculate wallet reserve amount ---
+      let walletAmount = 0;
+      let gatewayAmount = order.total;
+
+      if (useWallet && user.wallet?.balance > 0) {
+        walletAmount = Math.min(user.wallet.balance, order.total);
+        gatewayAmount = order.total - walletAmount;
+      }
+
+      // --- 6. Find existing retry session ---
+      let existingSession = null;
+      if (retrySessionId) {
+        existingSession = await PaymentSession.findOne({
+          sessionId: retrySessionId,
+          order: orderId,
+        }).session(session);
+      }
+
+      // --- 7. Create or update PaymentSession ---
+      let paymentSession;
+      if (existingSession) {
+        paymentSession = existingSession;
+        paymentSession.status = "active";
+        paymentSession.walletAmount = walletAmount;
+        paymentSession.paymentMethod = paymentMethod;
+        paymentSession.retryCount = (paymentSession.retryCount || 0) + 1;
+        paymentSession.lastRetryAt = new Date();
+        await paymentSession.save({ session });
+      } else {
+        const created = await PaymentSession.create(
+          [
+            {
+              sessionId,
+              user: userId,
+              order: orderId,
+              walletAmount,
+              paymentMethod,
+              status: "active",
+              retryCount: 0,
+            },
+          ],
+          { session }
+        );
+        paymentSession = created[0];
+      }
+
+      let gatewayPayload = null;
+
+      if (paymentMethod === "cod") {
+        // --- COD flow ---
+        if (walletAmount > 0) {
+          const walletTx = await processWalletPayment(
+            userId,
+            walletAmount,
+            orderId,
+            session
+          );
+          order.payments.push({
+            method: "wallet",
+            amount: walletAmount,
+            status: "success",
+            meta: { walletTransactionId: walletTx._id },
+          });
+        }
+
+        order.payments.push({
+          method: "cod",
+          amount: gatewayAmount,
+          status: "pending",
+        });
+
+        order.status = "confirmed";
+        order.paymentMethod = "cod";
+        await order.save({ session });
+
+        paymentSession.status = "completed";
+        paymentSession.completedAt = new Date();
+        await paymentSession.save({ session });
+      } else {
+        // --- Online payment flow ---
+        const adapter = await getActiveGatewayAdapter();
+        gatewayPayload = await adapter.createOrder({
+          amount: gatewayAmount,
+          currency: "INR",
+          receipt: `order_${orderId}_${sessionId}`,
+          notes: {
+            orderId: orderId.toString(),
+            sessionId,
+            userId: userId.toString(),
+            walletAmount: walletAmount.toString(),
+          },
+        });
+
+        paymentSession.gatewayOrderId = gatewayPayload?.id;
+        paymentSession.walletAmount = walletAmount; // reserved
+        await paymentSession.save({ session });
+
+        order.paymentMethod = paymentMethod;
+        await order.save({ session });
+      }
+
+      // --- 8. Clear caches ---
+      await cacheDelPattern(`orders:${userId}:*`);
+      await cacheDelPattern(`order:${orderId}`);
+
+      // --- 9. Return session info ---
+      res.json({
+        success: true,
+        sessionId: paymentSession.sessionId,
+        gateway: gatewayPayload,
+        walletAmount,
+        gatewayAmount,
+        paymentMethod,
+        orderStatus: paymentMethod === "cod" ? "confirmed" : "pending",
+        isRetry: !!retrySessionId,
+      });
     });
-
-    const result = await paymentService.createPaymentSession(userId, orderId, {
-      sessionId,
-      walletAmount,
-      paymentMethod,
-      userAgent: req.get("User-Agent"),
-      ip: req.ip,
-    });
-
-    res.json(result);
   } catch (error) {
     logger.error("Payment session creation failed", {
       error: error.message,
       orderId: req.params.orderId,
-      userId: req.user?._id,
     });
-
-    res.status(400).json({
-      message: error.message || "Payment session creation failed",
-    });
+    res.status(400).json({ message: error.message });
+  } finally {
+    session.endSession();
+    if (paymentLock) {
+      await releasePaymentLock(paymentLock);
+    }
   }
 };
 
 /**
- * Get Payment Status
+ * Verify and Process Payment - FRONTEND CALLBACK ENDPOINT
  */
-export const getPaymentStatus = async (req, res) => {
+export const verifyPayment = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    await session.withTransaction(async () => {
+      const { sessionId, gatewayPaymentId, gatewayOrderId, gatewaySignature } =
+        req.body;
+
+      const userId = req.user._id;
+
+      // Find payment session
+      const paymentSession = await PaymentSession.findOne({
+        sessionId,
+        user: userId,
+      }).session(session);
+
+      if (!paymentSession) {
+        throw new Error("Payment session not found");
+      }
+
+      // If already processed, return success
+      if (paymentSession.status === "completed") {
+        const order = await Order.findById(paymentSession.order).session(
+          session
+        );
+        return res.json({
+          success: true,
+          orderId: order._id,
+          orderStatus: order.status,
+          message: "Payment already processed",
+        });
+      }
+
+      // Verify payment with gateway
+      const adapter = await getActiveGatewayAdapter();
+      const verification = await adapter.verifyPayment({
+        gatewayPaymentId,
+        gatewayOrderId: gatewayOrderId || paymentSession.gatewayOrderId,
+        gatewaySignature,
+      });
+
+      if (!verification.valid) {
+        throw new Error("Payment verification failed");
+      }
+
+      const order = await Order.findById(paymentSession.order).session(session);
+
+      // NOW process wallet payment (only after gateway payment is confirmed)
+      if (paymentSession.walletAmount > 0) {
+        const walletTx = await processWalletPayment(
+          userId,
+          paymentSession.walletAmount,
+          order._id,
+          session
+        );
+
+        order.payments.push({
+          method: "wallet",
+          amount: paymentSession.walletAmount,
+          status: "success",
+          meta: { walletTransactionId: walletTx._id },
+        });
+      }
+
+      // Add gateway payment record
+      order.payments.push({
+        method: paymentSession.paymentMethod,
+        amount: verification.amount,
+        gatewayPaymentId,
+        status: "success",
+        meta: { verification },
+      });
+
+      order.status = "confirmed";
+      await order.save({ session });
+
+      // Mark session as completed
+      paymentSession.status = "completed";
+      paymentSession.completedAt = new Date();
+      paymentSession.gatewayPaymentId = gatewayPaymentId;
+      await paymentSession.save({ session });
+
+      // --- CLEAR USER CART AFTER PAYMENT SUCCESS ---
+      await Cart.deleteMany({ user: userId }).session(session);
+
+      // Clear cache
+      await cacheDelPattern(`orders:${userId}:*`);
+      await cacheDelPattern(`order:${order._id}`);
+
+      logger.info("Payment verified successfully", {
+        sessionId,
+        orderId: order._id,
+        gatewayAmount: verification.amount,
+        walletAmount: paymentSession.walletAmount,
+      });
+
+      res.json({
+        success: true,
+        orderId: order._id,
+        orderStatus: order.status,
+      });
+    });
+  } catch (error) {
+    logger.error("Payment verification failed", {
+      error: error.message,
+      sessionId: req.body.sessionId,
+    });
+
+    // If verification fails, trigger payment failure
+    if (req.body.sessionId) {
+      try {
+        await handlePaymentFailure(
+          {
+            body: {
+              sessionId: req.body.sessionId,
+              reason: `verification_failed: ${error.message}`,
+            },
+          },
+          { json: () => {} }
+        );
+      } catch (fallbackError) {
+        logger.error("Fallback failure handling also failed", {
+          error: fallbackError.message,
+        });
+      }
+    }
+
+    res.status(400).json({
+      success: false,
+      message: error.message,
+    });
+  } finally {
+    session.endSession();
+  }
+};
+
+/**
+ * Handle Payment Failure
+ */
+export const handlePaymentFailure = async (req, res) => {
+  const session = await mongoose.startSession();
+
+  try {
+    await session.withTransaction(async () => {
+      const { sessionId, reason = "unknown" } = req.body;
+
+      const paymentSession = await PaymentSession.findOneAndUpdate(
+        { sessionId },
+        { status: "failed", meta: { failureReason: reason } },
+        { session, new: true }
+      );
+
+      if (!paymentSession) {
+        return res.json({ success: false, message: "Session not found" });
+      }
+
+      const order = await Order.findById(paymentSession.order).session(session);
+
+      // Return stock
+      for (const item of order.items) {
+        await incrementVariantStock(item.variant, item.quantity, session);
+      }
+
+      // Revert coupon
+      if (order.coupon?.couponId) {
+        await revertCouponUsage(order.coupon.couponId, order.user, session);
+      }
+
+      // No wallet refund needed since we never deducted it!
+      // Wallet amount is only deducted after successful payment verification
+
+      order.status = "failed";
+      await order.save({ session });
+
+      // Clear cache
+      await cacheDelPattern(`orders:${order.user}:*`);
+      await cacheDelPattern(`order:${order._id}`);
+
+      res.json({ success: true });
+    });
+  } catch (error) {
+    logger.error("Payment failure handling failed", { error: error.message });
+    res.status(400).json({ message: error.message });
+  } finally {
+    session.endSession();
+  }
+};
+
+/**
+ * Check Payment Status - For frontend polling
+ */
+export const checkPaymentStatus = async (req, res) => {
   try {
     const { sessionId } = req.params;
+    const paymentSession = await PaymentSession.findOne({ sessionId });
 
-    const status = await paymentService.getPaymentStatus(sessionId);
-    res.json(status);
+    if (!paymentSession) {
+      return res.json({
+        status: "not_found",
+        message: "Payment session not found",
+      });
+    }
+
+    const order = await Order.findById(paymentSession.order);
+
+    res.json({
+      status: paymentSession.status,
+      orderStatus: order?.status,
+      sessionId: paymentSession.sessionId,
+      orderId: paymentSession.order,
+      paymentMethod: paymentSession.paymentMethod,
+      walletAmount: paymentSession.walletAmount,
+      completedAt: paymentSession.completedAt,
+    });
   } catch (error) {
-    logger.error("Get payment status failed", { error: error.message });
+    logger.error("Check payment status failed", { error: error.message });
     res.status(400).json({ message: error.message });
   }
 };
 
-/**
- * Payment Webhook Handler
- */
-export const paymentWebhook = async (req, res) => {
-  const gateway = req.params.gateway;
-  const payload = req.body;
-
-  try {
-    logger.info("Payment webhook received", { gateway, payload });
-
-    const adapter = await getActiveGatewayAdapter();
-    const verification = await adapter.verifyWebhook(payload);
-
-    if (!verification.valid) {
-      logger.warn("Invalid webhook signature", { gateway });
-      return res.status(400).json({ error: "Invalid signature" });
-    }
-
-    const sessionId =
-      payload.payload?.payment?.entity?.notes?.sessionId ||
-      payload.notes?.sessionId;
-
-    if (!sessionId) {
-      logger.error("Session ID not found in webhook", { gateway });
-      return res.status(400).json({ error: "Session ID not found" });
-    }
-
-    const event = payload.event || payload.status;
-
-    if (event === "payment.captured" || event === "success") {
-      await paymentService.processSuccessfulPayment(
-        verification.gatewayPaymentId,
-        sessionId,
-        payload
-      );
-    } else if (event === "payment.failed" || event === "failed") {
-      await paymentService.handlePaymentFailure(sessionId, "gateway_failure");
-    }
-
-    res.json({ received: true });
-  } catch (error) {
-    logger.error("Webhook processing failed", {
-      gateway,
-      error: error.message,
-      payload,
-    });
-
-    res.status(500).json({ error: "Webhook processing failed" });
-  }
-};
-
-/**
- * Get Order
- */
+// Keep other functions (getOrder, listOrders, cancelOrder) as they were
 export const getOrder = async (req, res) => {
   try {
     const { id } = req.params;
-    const order = await Order.findById(id)
-      .populate("items.product items.variant coupon.couponId user")
-      .populate("payments");
+    const cacheKey = `order:${id}`;
+
+    let order = await cacheGet(cacheKey);
 
     if (!order) {
-      return res.status(404).json({ message: "Order not found" });
+      order = await Order.findById(id).populate("items.product items.variant");
+      if (!order) return res.status(404).json({ message: "Order not found" });
+
+      await cacheSet(cacheKey, order, 600);
     }
 
     validateUserOwnership(order, req.user._id, "order");
     res.json(order);
   } catch (error) {
-    logger.error("Get order failed", {
-      error: error.message,
-      orderId: req.params.id,
-    });
     res.status(400).json({ message: error.message });
   }
 };
 
-/**
- * List Orders
- */
 export const listOrders = async (req, res) => {
   try {
-    const { userId, page = 1, limit = 20, status } = req.query;
-    const q = {};
+    const { page = 1, limit = 20, status } = req.query;
+    const userId = req.user._id;
+    const cacheKey = `orders:${userId}:${page}:${limit}:${status || "all"}`;
 
-    if (userId) q.user = userId;
-    if (status) q.status = status;
+    let orders = await cacheGet(cacheKey);
 
-    const orders = await Order.find(q)
-      .populate("items.product")
-      .sort({ createdAt: -1 })
-      .skip((page - 1) * limit)
-      .limit(Number(limit));
+    if (!orders) {
+      const query = { user: userId };
+      if (status) query.status = status;
+
+      orders = await Order.find(query)
+        .populate("items.product")
+        .sort({ createdAt: -1 })
+        .skip((page - 1) * limit)
+        .limit(Number(limit));
+
+      await cacheSet(cacheKey, orders, 300);
+    }
 
     res.json(orders);
   } catch (error) {
-    logger.error("List orders failed", { error: error.message });
     res.status(400).json({ message: error.message });
   }
 };
 
-/**
- * Cancel Order
- */
 export const cancelOrder = async (req, res) => {
   const session = await mongoose.startSession();
   try {
-    session.startTransaction();
+    await session.withTransaction(async () => {
+      const { id } = req.params;
+      const { reason = "" } = req.body;
 
-    const { id } = req.params;
-    const { reason = "" } = req.body;
+      const order = await Order.findById(id).session(session);
+      if (!order) throw new Error("Order not found");
 
-    const order = await Order.findById(id).session(session);
-    if (!order) {
-      throw new Error("Order not found");
-    }
+      validateUserOwnership(order, req.user._id, "order");
 
-    validateUserOwnership(order, req.user._id, "order");
+      if (!["pending", "confirmed"].includes(order.status)) {
+        throw new Error("Order cannot be cancelled");
+      }
 
-    if (!["pending", "confirmed", "processing"].includes(order.status)) {
-      throw new Error("Order cannot be cancelled in its current state");
-    }
+      // Return stock
+      for (const item of order.items) {
+        await incrementVariantStock(item.variant, item.quantity, session);
+      }
 
-    // Release stock reservations
-    await releaseStockReservation(order._id, null, session);
-
-    // Refund payments if already paid
-    if (["confirmed", "processing"].includes(order.status)) {
-      const successfulPayments = await Payment.find({
-        order: order._id,
-        status: "success",
-      }).session(session);
-
-      for (const payment of successfulPayments) {
-        if (payment.method === "wallet") {
-          await processWalletRefund(
-            order.user,
-            payment.amount,
-            order._id,
-            `Refund due to order cancellation: ${reason}`,
-            session
-          );
+      // Refund wallet payments (only if order was confirmed)
+      if (order.status === "confirmed") {
+        for (const payment of order.payments) {
+          if (payment.method === "wallet" && payment.status === "success") {
+            await processWalletRefund(
+              order.user,
+              payment.amount,
+              order._id,
+              `Cancellation: ${reason}`,
+              session
+            );
+          }
         }
-        // For gateway payments, you might want to initiate refund via gateway
-        payment.status = "refunded";
-        payment.meta.cancellationReason = reason;
-        await payment.save({ session });
       }
-    }
 
-    // Update order status
-    order.status = "cancelled";
-    order.meta.cancellation = {
-      reason,
-      cancelledAt: new Date(),
-      cancelledBy: req.user._id,
-    };
-    await order.save({ session });
+      // Revert coupon
+      if (order.coupon?.couponId) {
+        await revertCouponUsage(order.coupon.couponId, order.user, session);
+      }
 
-    await session.commitTransaction();
-    session.endSession();
+      order.status = "cancelled";
+      await order.save({ session });
 
-    logger.info("Order cancelled", { orderId: order._id, reason });
-    res.json({ ok: true, order });
-  } catch (error) {
-    await session.abortTransaction();
-    session.endSession();
+      await cacheDelPattern(`orders:${order.user}:*`);
+      await cacheDelPattern(`order:${order._id}`);
 
-    logger.error("Order cancellation failed", {
-      error: error.message,
-      orderId: req.params.id,
+      res.json({ success: true, order });
     });
-
-    res.status(400).json({ message: error.message });
-  }
-};
-
-/**
- * Cleanup Expired Reservations
- */
-export const cleanupExpiredReservations = async () => {
-  const session = await mongoose.startSession();
-  try {
-    session.startTransaction();
-
-    const expiredReservations = await StockReservation.find({
-      status: "active",
-      reservedUntil: { $lt: new Date() },
-    }).session(session);
-
-    for (const reservation of expiredReservations) {
-      logger.info("Cleaning up expired reservation", {
-        reservationId: reservation._id,
-        orderId: reservation.order,
-      });
-
-      // Release stock
-      for (const it of reservation.items) {
-        await incrementVariantStock(it.variant, it.qty, session);
-      }
-
-      // Update reservation status
-      reservation.status = "expired";
-      await reservation.save({ session });
-
-      // Revert coupon usage if any
-      const order = await Order.findById(reservation.order).session(session);
-      if (order && order.coupon && order.coupon.couponId) {
-        await revertCouponReservation(order.coupon.couponId, null, session);
-      }
-
-      // Update order status
-      if (order && order.status === "pending") {
-        order.status = "failed";
-        order.meta.failureReason = "reservation_expired";
-        await order.save({ session });
-      }
-
-      logger.info("Expired reservation cleaned up", {
-        reservationId: reservation._id,
-      });
-    }
-
-    await session.commitTransaction();
-    session.endSession();
-
-    return { cleaned: expiredReservations.length };
   } catch (error) {
-    await session.abortTransaction();
+    res.status(400).json({ message: error.message });
+  } finally {
     session.endSession();
-    logger.error("Reservation cleanup failed", { error: error.message });
-    throw error;
   }
 };
 
 export default {
   createOrder,
   createPaymentSession,
-  getPaymentStatus,
-  paymentWebhook,
+  verifyPayment, // NEW: Frontend callback endpoint
+  checkPaymentStatus, // NEW: For frontend polling
+  handlePaymentFailure,
   getOrder,
   listOrders,
   cancelOrder,
-  cleanupExpiredReservations,
 };

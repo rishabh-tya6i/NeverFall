@@ -18,6 +18,17 @@ const ReviewSchema = new mongoose.Schema(
     rating: { type: Number, min: 1, max: 5, required: true, index: true },
     body: { type: String, trim: true, default: "" },
     images: [{ url: String }],
+    status: {
+      type: String,
+      enum: ["pending", "approved", "rejected"],
+      default: "pending",
+      index: true,
+    },
+    flagged: {
+      type: Boolean,
+      default: false,
+      index: true,
+    },
   },
   { timestamps: true }
 );

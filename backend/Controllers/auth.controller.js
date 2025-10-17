@@ -64,7 +64,7 @@ export async function verifyOtpByMobile(req, res) {
       const attemptsKey = `otp:attempts:${phone}`;
       const attempts = await redis.incr(attemptsKey);
       if (attempts === 1) await redis.expire(attemptsKey, 600);
-      if (attempts >= 5) await redis.set(blockedKey, "1", { EX: 600 });
+      if (attempts >= 5) await redis.set(blockedKey, "1", "EX", 600);
       return res.status(400).json({ error: "Incorrect OTP" });
     }
 

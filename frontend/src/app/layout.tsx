@@ -1,5 +1,6 @@
 import { ThemeProvider } from 'next-themes';
 import "./globals.css";
+import Providers from './components/Providers';
 
 export default function RootLayout({
   children,
@@ -10,7 +11,9 @@ export default function RootLayout({
     <html lang="en">
       <body>
         <ThemeProvider>
-          {children}
+          <Providers>
+            {children}
+          </Providers>
         </ThemeProvider>
       </body>
     </html>

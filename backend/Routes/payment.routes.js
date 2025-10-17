@@ -1,10 +1,10 @@
 import express from "express";
-import { paymentWebhook } from "../Controllers/order.controller.js";
+import { verifyPayment } from "../Controllers/order.controller.js";
 
 const router = express.Router();
 
 // Webhook endpoints (no authentication required)
-router.post("/webhook/razorpay", paymentWebhook);
-router.post("/webhook/payu", paymentWebhook);
+router.post("/webhook/razorpay", verifyPayment);
+router.post("/webhook/payu", verifyPayment);
 
 export default router;

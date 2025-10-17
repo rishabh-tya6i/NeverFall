@@ -16,7 +16,9 @@ const OrderItemSchema = new mongoose.Schema(
     color: { type: String },
     size: { type: String },
     price: { type: Number, required: true },
+    priceAfterDiscount: { type: Number, required: true },
     quantity: { type: Number, required: true, min: 1 },
+    returnedQuantity: { type: Number, default: 0 },
     lineTotal: { type: Number, required: true },
   },
   { _id: false }
@@ -95,8 +97,19 @@ const OrderSchema = new mongoose.Schema(
       enum: ["cod", "wallet", "razorpay", "payu", "none"],
       default: "none",
     },
+    
+    walletTransactionId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "WalletTransaction",
+      default: null,
+    },
     payments: { type: [PaymentDetailSchema], default: [] },
     shippingAddress: { type: Object, default: {} },
+    deliveryDetails: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "Delivery",
+      default: null,
+    },
     meta: { type: Object, default: {} },
   },
   { timestamps: true }

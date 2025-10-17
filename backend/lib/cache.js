@@ -14,6 +14,19 @@ export const cacheSet = async (key, value, ttlSeconds = 60) => {
     await redis.set(key, str);
   }
 };
+export async function cacheDel(key) {
+  if (!key) return false;
+  try {
+    if (!redis) return false;
+    // redis.del returns number of keys removed
+    const deleted = await redis.del(key);
+    return Boolean(deleted && deleted > 0);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.warn("cacheDel error", err?.message || err);
+    return false;
+  }
+}
 
 export const cacheDelPattern = async (pattern) => {
   const stream = redis.scanStream({ match: pattern, count: 500 });

@@ -12,7 +12,12 @@ import cartRoutes from "./Routes/cart.routes.js";
 import couponRoutes from "./Routes/coupon.routes.js";
 import orderRoutes from "./Routes/order.routes.js";
 import paymentRoutes from "./Routes/payment.routes.js";
+import deliveryRoutes from "./Routes/delivery.routes.js";
+import exchangeRoutes from "./Routes/exchange.routes.js";
+import returnRoutes from "./Routes/return.routes.js";
+import mediaRoutes from "./Routes/media.routes.js";
 import { connectRedis } from "./lib/redis.js";
+import adminRoutes from "./Routes/admin/index.js";
 
 const app = express();
 app.set("trust proxy", 1);
@@ -38,12 +43,18 @@ app.get("/health", (req, res) =>
 );
 
 app.use("/api/auth", authRoutes);
+app.use("/api/delivery", deliveryRoutes);
 app.use("/api/products", productRoutes);
+app.use("/api/exchange", exchangeRoutes);
+app.use("/api/media", mediaRoutes);
 app.use("/api/reviews", reviewRoutes);
+app.use("/api/return", returnRoutes);
 app.use("/api/cart", cartRoutes);
 app.use("/api/coupons", couponRoutes);
 app.use("/api/payments", paymentRoutes);
 app.use("/api/orders", orderRoutes);
+
+app.use("/api/admin", adminRoutes);
 
 app.use((req, res) => res.status(404).json({ error: "Route not found" }));
 

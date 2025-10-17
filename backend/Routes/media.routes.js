@@ -1,13 +1,10 @@
 import { Router } from "express";
-import {
-  signUploadDemo,
-  deleteObjectDemo,
-} from "../controllers/mediaController.demo.js";
+import { signUpload, deleteObject } from "../controllers/media.controller.js";
 
 const router = Router();
 
-router.post("/media/sign", signUploadDemo);
+router.post("/media/sign", signUpload);
 
-router.delete("/media/object", deleteObjectDemo);
+router.delete("/media/object", deleteObject);
 
 export default router;

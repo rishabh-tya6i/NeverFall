@@ -17,6 +17,11 @@ const PaymentSchema = new mongoose.Schema(
       enum: ["cod", "wallet", "razorpay", "payu"],
       required: true,
     },
+    walletTransactionId: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "WalletTransaction",
+      default: null,
+    },
 
     // amount debited/charged for this payment doc (positive)
     amount: { type: Number, required: true },
