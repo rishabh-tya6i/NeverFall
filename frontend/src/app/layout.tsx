@@ -1,6 +1,8 @@
 import { ThemeProvider } from 'next-themes';
 import "./globals.css";
 import Providers from './components/Providers';
+import { ToastContainer } from 'react-toastify';
+
 
 export default function RootLayout({
   children,
@@ -12,6 +14,7 @@ export default function RootLayout({
       <body>
         <ThemeProvider>
           <Providers>
+          <ToastContainer />
             {children}
           </Providers>
         </ThemeProvider>

@@ -1,3 +1,4 @@
+//perfect
 import PaymentGatewayConfig from "../Models/PaymentGatewayConfig.js";
 export const validateAndSetGateway = async (req, res) => {
   const { gateway } = req.body;

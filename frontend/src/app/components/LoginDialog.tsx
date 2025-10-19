@@ -2,10 +2,13 @@
 
 import { useState } from "react";
 import secureLocalStorage from "react-secure-storage";
-import { LOGOUT, SEND_OTP, VERIFY_OTP } from "../constants/Constant";
+import { useRouter } from "next/navigation";
+import { LOGOUT, SEND_OTP, VERIFY_OTP, AUTH_TOKEN_KEY, USER_ID_KEY } from "../constants/Constant";
 import * as Dialog from "@radix-ui/react-dialog";
+import { toast } from "react-toastify";
 
 export default function LoginDialog() {
+  const router = useRouter();
   const [open, setOpen] = useState(false);
   const [step, setStep] = useState<"request" | "verify" | "loggedin">("request");
   const [phone, setPhone] = useState("");
@@ -29,10 +32,11 @@ export default function LoginDialog() {
       });
       const data = await res.json();
       if (res.ok) {
-        setMessage("OTP sent successfully ✅");
+        setMessage("OTP sent successfully ");
         setStep("verify");
       } else {
         setMessage(data.error || "Failed to send OTP");
+        toast.error(data.error || "Failed to send OTP");
       }
     } catch (err) {
       setMessage("Server error, try again later");
@@ -56,11 +60,18 @@ export default function LoginDialog() {
       });
       const data = await res.json();
       if (res.ok) {
-        secureLocalStorage.setItem("auth_token", data.token);
+        secureLocalStorage.setItem(AUTH_TOKEN_KEY, data.token);
+        localStorage.setItem(USER_ID_KEY, data.user.id);
         setUser(data.user);
         setStep("loggedin");
+        // Close dialog and refresh page after successful login
+        setTimeout(() => {
+          setOpen(false);
+          window.location.reload();
+        }, 1500);
       } else {
         setMessage(data.error || "Invalid OTP");
+        toast.error(data.error || "Invalid OTP");
       }
     } catch (err) {
       setMessage("Server error, try again later");
@@ -75,7 +86,8 @@ export default function LoginDialog() {
       method: "POST",
       credentials: "include",
     });
-    secureLocalStorage.removeItem("auth_token");
+    secureLocalStorage.removeItem(AUTH_TOKEN_KEY);
+    localStorage.removeItem(USER_ID_KEY);
     setUser(null);
     setStep("request");
     setOtp("");

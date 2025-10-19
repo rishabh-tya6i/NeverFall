@@ -80,79 +80,80 @@ export const getAllPayments = async (req, res) => {
 /**
  * Process a manual refund for a specific payment
  */
-export const processManualRefund = async (req, res) => {
-  const session = await mongoose.startSession();
-  try {
-    session.startTransaction();
-    const { paymentId } = req.params;
-    const { reason = "Manual refund by admin" } = req.body;
-    const adminId = req.user.id;
+//No usage use from adminOrder.controller
+// export const processManualRefund = async (req, res) => {
+//   const session = await mongoose.startSession();
+//   try {
+//     session.startTransaction();
+//     const { paymentId } = req.params;
+//     const { reason = "Manual refund by admin" } = req.body;
+//     const adminId = req.user.id;
 
-    const payment = await Payment.findById(paymentId).session(session);
-    if (!payment) {
-      return res.status(404).json({ message: "Payment not found" });
-    }
+//     const payment = await Payment.findById(paymentId).session(session);
+//     if (!payment) {
+//       return res.status(404).json({ message: "Payment not found" });
+//     }
 
-    if (payment.status !== "success") {
-      return res
-        .status(400)
-        .json({ message: "Only successful payments can be refunded" });
-    }
+//     if (payment.status !== "success") {
+//       return res
+//         .status(400)
+//         .json({ message: "Only successful payments can be refunded" });
+//     }
 
-    const order = await Order.findById(payment.order).session(session);
-    if (!order) {
-      return res.status(404).json({ message: "Associated order not found" });
-    }
+//     const order = await Order.findById(payment.order).session(session);
+//     if (!order) {
+//       return res.status(404).json({ message: "Associated order not found" });
+//     }
 
-    if (payment.method === "wallet") {
-      await processWalletRefund(
-        payment.user,
-        payment.amount,
-        payment.order,
-        reason,
-        session
-      );
-    } else {
-      // For gateway payments, this would trigger a gateway refund.
-      // For now, we just mark it as refunded.
-      payment.status = "refunded";
-      payment.meta.refundReason = reason;
-      payment.meta.refundedBy = adminId;
-      await payment.save({ session });
-    }
+//     if (payment.method === "wallet") {
+//       await processWalletRefund(
+//         payment.user,
+//         payment.amount,
+//         payment.order,
+//         reason,
+//         session
+//       );
+//     } else {
+//       // For gateway payments, this would trigger a gateway refund.
+//       // For now, we just mark it as refunded.
+//       payment.status = "refunded";
+//       payment.meta.refundReason = reason;
+//       payment.meta.refundedBy = adminId;
+//       await payment.save({ session });
+//     }
 
-    // Update order status to 'refunded' if all payments are refunded
-    const allPaymentsForOrder = await Payment.find({ order: order._id }).session(
-      session
-    );
-    const allRefunded = allPaymentsForOrder.every(
-      (p) => p.status === "refunded"
-    );
+//     // Update order status to 'refunded' if all payments are refunded
+//     const allPaymentsForOrder = await Payment.find({ order: order._id }).session(
+//       session
+//     );
+//     const allRefunded = allPaymentsForOrder.every(
+//       (p) => p.status === "refunded"
+//     );
 
-    if (allRefunded) {
-      order.status = "refunded";
-      order.meta.refund = {
-        approvedBy: adminId,
-        approvedAt: new Date(),
-        reason,
-      };
-      await order.save({ session });
-    }
+//     if (allRefunded) {
+//       order.status = "refunded";
+//       order.meta.refund = {
+//         approvedBy: adminId,
+//         approvedAt: new Date(),
+//         reason,
+//       };
+//       await order.save({ session });
+//     }
 
-    await session.commitTransaction();
+//     await session.commitTransaction();
 
-    logger.info(
-      `Manual refund processed for payment ${payment._id} by admin ${adminId}`
-    );
-    res.json({ message: "Refund processed successfully", payment });
-  } catch (error) {
-    await session.abortTransaction();
-    logger.error("Failed to process manual refund:", error);
-    res.status(500).json({ message: "Failed to process manual refund" });
-  } finally {
-    session.endSession();
-  }
-};
+//     logger.info(
+//       `Manual refund processed for payment ${payment._id} by admin ${adminId}`
+//     );
+//     res.json({ message: "Refund processed successfully", payment });
+//   } catch (error) {
+//     await session.abortTransaction();
+//     logger.error("Failed to process manual refund:", error);
+//     res.status(500).json({ message: "Failed to process manual refund" });
+//   } finally {
+//     session.endSession();
+//   }
+// };
 
 /**
  * Get payment analytics
