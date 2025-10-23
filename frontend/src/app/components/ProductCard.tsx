@@ -125,7 +125,7 @@ export default function ProductCard({
               </span>
             )}
           </div>
-          <div className="card-actions justify-between items-center mt-2">
+          {/* <div className="card-actions justify-between items-center mt-2">
             <div className="badge badge-outline">
               {product.variants?.length || 0} variants
             </div>
@@ -142,7 +142,7 @@ export default function ProductCard({
                 )}
               </button>
             )}
-          </div>
+          </div> */}
         </div>
       </Link>
     </div>

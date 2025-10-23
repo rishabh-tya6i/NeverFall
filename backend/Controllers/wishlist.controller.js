@@ -10,7 +10,7 @@ async function getCachedWishlist(userId) {
   return cached ? JSON.parse(cached) : null;
 }
 async function setCachedWishlist(userId, payload, ttl = WL_TTL) {
-  await redis.set(wlKey(userId), JSON.stringify(payload), { EX: ttl });
+  await redis.set(wlKey(userId), JSON.stringify(payload), 'EX', ttl);
 }
 async function invalidateWishlist(userId) {
   await redis.del(wlKey(userId));
@@ -57,33 +57,29 @@ export async function getWishlist(req, res) {
 
 
 export async function addToWishlist(req, res) {
-  try {
-    const userId = req.user?._id || req.user?.id;
-    const { productId } = req.body || {};
-    if (!userId) return res.status(401).json({ error: "Unauthorized" });
-    if (!productId)
-      return res.status(400).json({ error: "productId is required" });
+  console.log("req.user", req.user);
+  console.log("req.body", req.body);
+  const userId = req.user?._id || req.user?.id;
+  const { productId } = req.body || {};
+  if (!userId) return res.status(401).json({ error: "Unauthorized" });
+  if (!productId)
+    return res.status(400).json({ error: "productId is required" });
 
-    const prod = await Product.findById(productId).select("_id");
-    if (!prod) return res.status(404).json({ error: "Product not found" });
+  const prod = await Product.findById(productId).select("_id");
+  if (!prod) return res.status(404).json({ error: "Product not found" });
 
-    const doc = await WishlistItem.findOneAndUpdate(
-      { user: userId, product: productId },
-      {
-        $setOnInsert: { user: userId, product: productId, addedAt: new Date() },
-      },
-      { upsert: true, new: true, setDefaultsOnInsert: true }
-    ).lean();
+  const doc = await WishlistItem.findOneAndUpdate(
+    { user: userId, product: productId },
+    {
+      $setOnInsert: { user: userId, product: productId, addedAt: new Date() },
+    },
+    { upsert: true, new: true, setDefaultsOnInsert: true }
+  ).lean();
 
-    // LIVE refresh (invalidate -> read DB -> set cache)
-    const wishlist = await refreshWishlistCache(userId);
+  // LIVE refresh (invalidate -> read DB -> set cache)
+  const wishlist = await refreshWishlistCache(userId);
 
-    return res.json({ added: true, item: doc, ...wishlist });
-  } catch (e) {
-    if (e?.code === 11000)
-      return res.json({ added: false, reason: "Already in wishlist" });
-    return res.status(500).json({ error: "Something went wrong" });
-  }
+  return res.json({ added: true, item: doc, ...wishlist });
 }
 
 export async function removeFromWishlist(req, res) {

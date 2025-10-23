@@ -7,11 +7,16 @@ import { useRouter } from 'next/navigation';
 import { cartAPI, authAPI } from '@/services/api';
 import LoginDialog from "./LoginDialog";
 import secureLocalStorage from 'react-secure-storage';
+import { IoMoonSharp, IoSunny } from "react-icons/io5";
+import { FaOpencart } from "react-icons/fa";
+import { BsBagHeartFill } from "react-icons/bs";
+import { useProfileStore } from '../store/useProfileStore';
 
 const Navbar = () => {
   const { theme, setTheme } = useTheme();
   const router = useRouter();
   const [isLoggedIn, setIsLoggedIn] = useState(false);
+  const { activeTab, setActiveTab } = useProfileStore();
   const [user, setUser] = useState<any>(null);
   const [mounted, setMounted] = useState(false);
 
@@ -68,10 +73,7 @@ const Navbar = () => {
                 <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor"> <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M4 6h16M4 12h16M4 18h7" /> </svg>
             </div>
             <ul tabIndex={0} className="menu menu-sm dropdown-content bg-base-100 rounded-box z-1 mt-3 w-52 p-2 shadow">
-                <li><Link href='/'>Home</Link></li>
                 <li><Link href='/products'>Products</Link></li>
-                <li><Link href='/categories'>Categories</Link></li>
-                <li><Link href='/about'>About</Link></li>
                 <li><Link href='/contact'>Contact</Link></li>
             </ul>
             </div>
@@ -81,24 +83,17 @@ const Navbar = () => {
         </div>
 
         <ul className="lg:navbar-center md:hidden sm:hidden menu menu-vertical lg:menu-horizontal bg-base-200 rounded-box">
-            <li><Link href='/'>Home</Link></li>
             <li><Link href='/products'>Products</Link></li>
-            <li><Link href='/categories'>Categories</Link></li>
-            <li><Link href='/about'>About</Link></li>
             <li><Link href='/contact'>Contact</Link></li>
         </ul>
 
-        <div className="navbar-end">
+        <div className="navbar-end gap-4">
             {mounted && (
               <button className="btn btn-ghost btn-circle" onClick={() => setTheme(theme === 'light' ? 'dark' : 'light')}>
                   {theme === 'light' ? (
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M20.354 15.354A9 9 0 018.646 3.646 9.003 9.003 0 0012 21a9.003 9.003 0 008.354-5.646z" />
-                      </svg>
+                      <IoMoonSharp size={22}/>
                   ) : (
-                      <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                          <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M12 3v1m0 16v1m8.66-12.66l-.707.707M4.04 19.96l-.707.707M21 12h-1M4 12H3m16.66 7.96l-.707-.707M5.04 5.04l-.707-.707" />
-                      </svg>
+                      <IoSunny size={22}/>
                   )}
               </button>
             )}
@@ -108,15 +103,20 @@ const Navbar = () => {
               onClick={() => router.push('/cart')}
             >
               <div className="indicator">
-                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M3 3h2l.4 2M7 13h10l4-8H5.4m0 0L7 13m0 0l-2.5 5M7 13l2.5 5m6-5v6a2 2 0 11-4 0v-6m4 0V9a2 2 0 00-2-2H9a2 2 0 00-2 2v4.01" />
-                </svg>
+                <FaOpencart size={22}/>
                 {cartData && cartData.count > 0 && (
                   <span className="badge badge-xs badge-primary indicator-item">
                     {cartData.count}
                   </span>
                 )}
               </div>
+            </button>
+
+            <button
+              className="btn btn-ghost btn-circle"
+              onClick={() => {setActiveTab('wishlist'); router.push('/profile');}}
+            >
+                <BsBagHeartFill size={22}/>
             </button>
 
             {isLoggedIn ? (
@@ -129,12 +129,6 @@ const Navbar = () => {
                   </div>
                 </div>
                 <ul tabIndex={0} className="menu menu-sm dropdown-content bg-base-100 rounded-box z-[1] mt-3 w-52 p-2 shadow">
-                  <li>
-                    <div className="justify-between">
-                      <span>Profile</span>
-                      <span className="badge">New</span>
-                    </div>
-                  </li>
                   <li><Link href="/profile">My Profile</Link></li>
                   <li><Link href="/orders">My Orders</Link></li>
                   <li><Link href="/returns">My Returns</Link></li>

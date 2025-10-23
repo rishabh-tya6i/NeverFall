@@ -7,11 +7,18 @@ import { authAPI, wishlistAPI } from "@/services/api";
 import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
 import secureLocalStorage from "react-secure-storage";
+import { useProfileStore } from "../store/useProfileStore";
+import { IoPerson } from "react-icons/io5";
+import { BsBagHeartFill } from "react-icons/bs";
+import { FaBox } from "react-icons/fa6";
+import { LuBadgeIndianRupee } from "react-icons/lu";
+import { FaStar } from "react-icons/fa6";
+
 
 export default function ProfilePage() {
   const router = useRouter();
   const queryClient = useQueryClient();
-  const [activeTab, setActiveTab] = useState("profile");
+  const { activeTab, setActiveTab } = useProfileStore();
   const [isEditing, setIsEditing] = useState(false);
   const [profileData, setProfileData] = useState({
     name: "",
@@ -155,6 +162,16 @@ export default function ProfilePage() {
                 <ul className="menu">
                   <li>
                     <button
+                      onClick={() => setActiveTab("overview")}
+                      className={`btn btn-ghost justify-start ${
+                        activeTab === "profile" ? "btn-active" : ""
+                      }`}
+                    >
+                      Overview
+                    </button>
+                  </li>
+                  <li>
+                    <button
                       onClick={() => setActiveTab("profile")}
                       className={`btn btn-ghost justify-start ${
                         activeTab === "profile" ? "btn-active" : ""
@@ -183,6 +200,26 @@ export default function ProfilePage() {
                       Orders
                     </button>
                   </li>
+                  <li>
+                    <button
+                      onClick={() => setActiveTab("refunds")}
+                      className={`btn btn-ghost justify-start ${
+                        activeTab === "refunds" ? "btn-active" : ""
+                      }`}
+                    >
+                      Refunds
+                    </button>
+                  </li>
+                  <li>
+                    <button
+                      onClick={() => setActiveTab("reviews")}
+                      className={`btn btn-ghost justify-start ${
+                        activeTab === "reviews" ? "btn-active" : ""
+                      }`}
+                    >
+                      Ratings & Reviews
+                    </button>
+                  </li>
                 </ul>
               </div>
             </div>
@@ -190,6 +227,37 @@ export default function ProfilePage() {
 
           {/* Main Content */}
           <div className="lg:col-span-3">
+            
+            {activeTab === "overview" && (
+              <div className="card bg-base-100 shadow">
+                <div className="card-body">
+                  <h2 className="card-title mb-6">Overview</h2>
+                  <div className="grid grid-cols-2 gap-4">
+                    <div onClick={() => setActiveTab('profile')} className="card bg-base-200 justify-center py-6 gap-2 cursor-pointer text-center items-center hover:scale-105 hover:bg-base-300">
+                      <IoPerson size={30}/>
+                      <p>Manage Your Profile</p>
+                    </div>
+                    <div onClick={() => setActiveTab('wishlist')} className="card bg-base-200 justify-center py-6 gap-2 cursor-pointer text-center items-center hover:scale-105 hover:bg-base-300">
+                      <BsBagHeartFill size={30}/>
+                      <p>Check Your Wishlist</p>
+                    </div>
+                    <div onClick={() => setActiveTab('orders')} className="card bg-base-200 justify-center py-6 gap-2 cursor-pointer text-center items-center hover:scale-105 hover:bg-base-300">
+                      <FaBox size={30}/>
+                      <p>Track and manage your orders</p>
+                    </div>
+                    <div onClick={() => setActiveTab('refunds')} className="card bg-base-200 justify-center py-6 gap-2 cursor-pointer text-center items-center hover:scale-105 hover:bg-base-300">
+                      <LuBadgeIndianRupee size={30}/>
+                      <p>Track your refunds</p>
+                    </div>
+                    <div onClick={() => setActiveTab('reviews')} className="card bg-base-200 justify-center py-6 gap-2 cursor-pointer text-center items-center hover:scale-105 hover:bg-base-300">
+                      <FaStar size={30}/>
+                      <p>Manage Your reviews</p>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {activeTab === "profile" && (
               <div className="card bg-base-100 shadow">
                 <div className="card-body">
@@ -339,6 +407,47 @@ export default function ProfilePage() {
                   >
                     View All Orders
                   </button>
+                </div>
+              </div>
+            )}
+
+            {activeTab === "refunds" && (
+              <div className="card bg-base-100 shadow">
+                <div className="card-body">
+                  <h2 className="card-title mb-6">Refunds</h2>
+                  <p className="text-gray-600 mb-4">
+                    View and track your refunds.
+                  </p>
+                  <button
+                    onClick={() => router.push("/returns")}
+                    className="btn btn-primary"
+                  >
+                    View Refunds
+                  </button>
+                </div>
+              </div>
+            )}
+
+            {activeTab === "reviews" && (
+              <div className="card bg-base-100 shadow">
+                <div className="card-body">
+                  <h2 className="card-title mb-6">Your Reviews</h2>
+                  <p className="text-gray-600 mb-4">
+                    Here you can see and manage your product reviews.
+                  </p>
+                  {/* Placeholder for reviews list */}
+                  <div className="text-center py-8">
+                    <h3 className="text-lg font-semibold mb-2">No reviews yet</h3>
+                    <p className="text-gray-600 mb-4">
+                      You haven't written any reviews yet.
+                    </p>
+                    <button
+                      onClick={() => router.push("/orders")}
+                      className="btn btn-primary"
+                    >
+                      Review Products from Past Orders
+                    </button>
+                  </div>
                 </div>
               </div>
             )}

@@ -8,9 +8,30 @@ import Navbar from "./components/Navbar";
 import ProductCard from "./components/ProductCard";
 import LoadingSpinner from "./components/LoadingSpinner";
 import Link from "next/link";
+import ImageCarousel from "./components/ImageCarousel";
+import { useProductStore } from "./store/useProductStore";
+import Pagination from "./components/Pagination";
+import { useEffect } from "react";
 
 export default function Home() {
   const router = useRouter();
+  const {
+      products,
+      loading,
+      filters,
+      page,
+      totalPages,
+      fetchProducts,
+      setFilters,
+    } = useProductStore();
+
+  useEffect(() => {
+    fetchProducts(filters, page);
+  }, [page]);
+
+  const handlePageChange = (newPage: number) => {
+    useProductStore.setState({ page: newPage });
+  };
 
   // Fetch featured products
   const { data: featuredProducts, isLoading: featuredLoading } = useQuery({
@@ -42,30 +63,7 @@ export default function Home() {
   return (
     <>
       <Navbar />
-      
-      {/* Hero Section */}
-      <div className="hero min-h-screen bg-gradient-to-r from-primary to-secondary relative">
-        <div className="hero-content text-center text-white">
-            <div className="max-w-md">
-            <h1 className="text-5xl font-bold mb-4">NeverFall</h1>
-            <p className="text-xl mb-8">Your Ultimate Fashion Destination</p>
-            <button 
-              onClick={() => router.push("/products")}
-              className="btn btn-accent btn-lg"
-            >
-              Shop Now
-            </button>
-          </div>
-        </div>
-              <video
-          className="absolute top-0 left-0 w-full h-full object-cover opacity-20"
-                src="/hero.mp4" 
-                autoPlay
-                loop
-                muted
-              />
-            </div>
-
+      <ImageCarousel />
       {/* Featured Products */}
       <div className="container mx-auto p-6">
         <h2 className="text-3xl font-bold text-center mb-8">Featured Products</h2>
@@ -104,6 +102,29 @@ export default function Home() {
         </div>
       </div>
 
+      {/* Hero Section */}
+      <div className="hero min-h-screen relative">
+        <div className="hero-content text-center text-white">
+            <div className="max-w-md">
+            <h1 className="text-5xl font-bold mb-4">NeverFall</h1>
+            <p className="text-xl mb-8">Your Ultimate Fashion Destination</p>
+            <button 
+              onClick={() => router.push("/products")}
+              className="btn btn-accent btn-lg"
+            >
+              Shop Now
+            </button>
+          </div>
+        </div>
+        <video
+          className="absolute top-0 left-0 w-full h-full object-cover"
+          src="/hero.mp4" 
+          autoPlay
+          loop
+          muted
+        />
+      </div>
+
       {/* Trending Products */}
       <div className="container mx-auto p-6">
         <div className="flex justify-between items-center mb-8">
@@ -123,6 +144,34 @@ export default function Home() {
               <ProductCard key={product._id} product={product} />
             ))}
           </div>
+        )}
+      </div>
+
+      <ImageCarousel />
+
+      <div className="lg:col-span-3">
+        {loading ? (
+          <LoadingSpinner size="lg" text="Loading products..." />
+        ) : products.length === 0 ? (
+          <div className="text-center py-16">
+            <h2 className="text-2xl font-bold mb-4">No products found</h2>
+          </div>
+        ) : (
+          <>
+            <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-6">
+              {products.map((product: any) => (
+                <ProductCard key={product.id} product={product} />
+              ))}
+            </div>
+
+            {/* Pagination */}
+            <Pagination
+              currentPage={page}
+              totalPages={totalPages}
+              onPageChange={handlePageChange}
+              className="mt-8"
+            />
+          </>
         )}
       </div>
 

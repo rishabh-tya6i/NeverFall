@@ -1,4 +1,4 @@
-import { ThemeProvider } from 'next-themes';
+import { ThemeProvider } from './components/ThemeRegistry';
 import "./globals.css";
 import Providers from './components/Providers';
 import { ToastContainer } from 'react-toastify';
@@ -10,9 +10,9 @@ export default function RootLayout({
   children: React.ReactNode;
 }>) {
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning={true}>
       <body>
-        <ThemeProvider>
+        <ThemeProvider attribute="data-theme" defaultTheme="light">
           <Providers>
           <ToastContainer />
             {children}

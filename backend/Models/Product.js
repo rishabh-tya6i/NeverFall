@@ -40,6 +40,10 @@ const ProductSchema = new mongoose.Schema(
     },
     clicks: { type: Number, default: 0 },
     purchases: { type: Number, default: 0 },
+    meta: {
+      type: String,
+      default: null,
+    },
   },
   { timestamps: true }
 );

@@ -4,6 +4,8 @@ import Product from "../Models/Product.js";
 import ParentProduct from "../Models/ParentProduct.js";
 import Category from "../Models/Category.js";
 import ProductVariant from "../Models/ProductVariant.js";
+import Cart from "../Models/Cart.js";
+import WishlistItem from "../Models/WishlistItem.js";
 import Review from "../Models/Review.js";
 import { redis } from "../lib/redis.js";
 import { cacheGet as redisGet, cacheSet as redisSet } from "../lib/cache.js";
@@ -401,6 +403,188 @@ export const getProductsByFilter = async (req, res) => {
   const payload = { items: withCardVariant, nextCursor, limit };
   await redisSet(key, payload, 300);
   res.json(payload);
+};
+
+//Recommended products
+export const getRecommendations = async (req, res) => {
+  try {
+    const userId = req.user?.id || req.user?._id || req.query.userId;
+    if (!userId) return res.status(400).json({ message: "userId required" });
+
+    const limit = Math.min(30, Math.max(10, toNum(req.query.limit, 30)));
+    const cacheKey = cacheKeyFromReq(req, "prd:recommendations");
+
+    // Try cache
+    const cached = await redisGet(cacheKey);
+    if (cached) return res.json(cached);
+
+    // 1) Fetch cart and wishlist
+    const [cart, wishlistItems] = await Promise.all([
+      Cart.findOne({ user: userId })
+        .lean()
+        .catch(() => null),
+      WishlistItem.find({ user: userId })
+        .lean()
+        .catch(() => []),
+    ]);
+
+    // collect product ids to exclude (wishlist has product-level ids)
+    const wishlistProductIds = wishlistItems.map((w) => String(w.product));
+
+    // cart stores ParentProduct refs (per your cart model)
+    const cartParentIds = (cart?.items || []).map((i) => String(i.product));
+
+    // 2) Gather parent IDs from wishlist (wishlist stores color Product), so resolve product -> parent
+    let wishlistParentIds = [];
+    if (wishlistProductIds.length) {
+      const wishProducts = await Product.find({
+        _id: { $in: wishlistProductIds },
+      })
+        .select("parent")
+        .lean();
+      wishlistParentIds = wishProducts
+        .map((p) => String(p.parent))
+        .filter(Boolean);
+    }
+
+    // Build priority parents: cart parents first, then wishlist parents (avoid duplicates)
+    const priorityParentIds = [
+      ...new Set([...cartParentIds, ...wishlistParentIds]),
+    ].filter(Boolean);
+
+    // 3) Resolve categories from those parent products (ParentProduct.categories)
+    let categoryIds = [];
+    if (priorityParentIds.length) {
+      const parents = await ParentProduct.find({
+        _id: { $in: priorityParentIds },
+      })
+        .select("categories")
+        .lean();
+      categoryIds = parents
+        .map((p) => (p.categories ? String(p.categories) : null))
+        .filter(Boolean);
+    }
+
+    // If no cart/wishlist parents -> no category-based recommendation
+    let recommendedProducts = [];
+
+    const excludedProductIds = new Set([
+      ...wishlistProductIds, // exclude exact wishlist color-products
+    ]);
+
+    // Also exclude any product whose parent is in cart (so user doesn't get the same parent they already put in cart)
+    // We'll collect product ids to exclude later after fetching by parent check.
+
+    // 4) If we have categoryIds, first fetch Products in those categories
+    if (categoryIds.length) {
+      // find parent products in these categories
+      const parentsInCats = await ParentProduct.find({
+        categories: {
+          $in: categoryIds.map((c) => new mongoose.Types.ObjectId(c)),
+        },
+      })
+        .select("_id")
+        .lean();
+
+      const parentIdsInCats = parentsInCats.map((p) => String(p._id));
+
+      // fetch Products (color-level) for those parents
+      const productsInCats = await Product.find({
+        parent: {
+          $in: parentIdsInCats.map((id) => new mongoose.Types.ObjectId(id)),
+        },
+        // optional: only published/inStock items
+        publishAt: { $lte: new Date() },
+      })
+        .select(listSelect)
+        .sort({ purchases: -1, clicks: -1, publishAt: -1 })
+        .limit(limit * 2) // fetch extra to filter excludes and still have room
+        .lean();
+
+      // filter out exact wishlist product IDs and products that have parent equal to cart parents (so we recommend 'other' products)
+      const filtered = productsInCats.filter(
+        (p) =>
+          !excludedProductIds.has(String(p._id)) &&
+          !cartParentIds.includes(String(p.parent))
+      );
+
+      // keep unique products (by _id) and slice to limit
+      const uniqById = [];
+      const seen = new Set();
+      for (const p of filtered) {
+        const id = String(p._id);
+        if (!seen.has(id)) {
+          seen.add(id);
+          uniqById.push(p);
+        }
+        if (uniqById.length >= limit) break;
+      }
+
+      recommendedProducts = uniqById;
+    }
+
+    // 5) If we don't have enough (or had no categories at all), fallback to popular items
+    if (recommendedProducts.length < Math.min(10, limit)) {
+      // assemble exclusion list: wishlist product ids + already selected product ids
+      const selectedIds = recommendedProducts.map((p) => String(p._id));
+      const excludeIds = [
+        ...new Set([...wishlistProductIds, ...selectedIds]),
+      ].map((id) => new mongoose.Types.ObjectId(id));
+
+      // fetch popular products to fill up to at least 10 (or requested limit)
+      const need =
+        Math.min(limit, Math.max(10, limit)) - recommendedProducts.length;
+      const popular = await Product.find({
+        _id: { $nin: excludeIds },
+        publishAt: { $lte: new Date() },
+      })
+        .select(listSelect)
+        .sort({ purchases: -1, clicks: -1, publishAt: -1 })
+        .limit(need * 2)
+        .lean();
+
+      // add until we reach required count (up to limit)
+      for (const p of popular) {
+        if (recommendedProducts.length >= limit) break;
+        if (
+          !recommendedProducts.find((rp) => String(rp._id) === String(p._id))
+        ) {
+          recommendedProducts.push(p);
+        }
+      }
+    }
+
+    // ensure final size between min 10 and max limit (but if DB doesn't have enough, return what we have)
+    if (recommendedProducts.length > limit)
+      recommendedProducts = recommendedProducts.slice(0, limit);
+
+    // 6) Attach representative variant (cardVariant)
+    const withCardVariant = await Promise.all(
+      recommendedProducts.map(async (p) => {
+        const base = await resolveDefaultVariant(p);
+        const cardVariant = toCardVariant(base, p);
+        return { ...p, cardVariant };
+      })
+    );
+
+    const payload = {
+      items: withCardVariant,
+      count: withCardVariant.length,
+      source: {
+        usedCategories: categoryIds,
+        usedParents: priorityParentIds,
+        fromCart: cartParentIds.length > 0,
+        fromWishlist: wishlistParentIds.length > 0,
+      },
+    };
+
+    // cache short (120s)
+    await redisSet(cacheKey, payload, 120);
+    return res.json(payload);
+  } catch (err) {
+    console.error("getRecommendations error:", err);
+    return res.status(500).json({ message: "Server error" });
+  }
 };
 
 //Working

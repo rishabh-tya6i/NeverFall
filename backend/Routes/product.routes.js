@@ -4,6 +4,7 @@ import {
   getAllProducts,
   getProductsByFilter,
   getProductsBySearch,
+  getRecommendations,
   getFacets,
   getNewArrivals,
   getFeatured,
@@ -43,6 +44,9 @@ router.get("/featured", getFeatured);
 
 // Trending products
 router.get("/trending", getTrending);
+
+//Recommended Products
+router.get("/recommended", auth, getRecommendations);
 
 /* -------------------------------------------------------------
    PRODUCT DETAILS

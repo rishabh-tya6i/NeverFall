@@ -16,7 +16,10 @@ import deliveryRoutes from "./Routes/delivery.routes.js";
 import exchangeRoutes from "./Routes/exchange.routes.js";
 import returnRoutes from "./Routes/return.routes.js";
 import mediaRoutes from "./Routes/media.routes.js";
+import wishlistRoutes from "./Routes/wishlist.routes.js";
 import { connectRedis } from "./lib/redis.js";
+import publicFilterRoutes from "./Routes/publicFilter.routes.js";
+import adminFilterRoutes from "./Routes/admin/adminFilter.routes.js";
 import adminRoutes from "./Routes/admin/index.js";
 
 const app = express();
@@ -46,6 +49,10 @@ app.use("/api/auth", authRoutes);
 app.use("/api/delivery", deliveryRoutes);
 app.use("/api/products", productRoutes);
 app.use("/api/exchange", exchangeRoutes);
+//filter get
+app.use("/api/publicFilter", publicFilterRoutes);
+app.use("/api/adminFilter", adminFilterRoutes);
+
 app.use("/api/media", mediaRoutes);
 app.use("/api/reviews", reviewRoutes);
 app.use("/api/return", returnRoutes);
@@ -53,6 +60,7 @@ app.use("/api/cart", cartRoutes);
 app.use("/api/coupons", couponRoutes);
 app.use("/api/payments", paymentRoutes);
 app.use("/api/orders", orderRoutes);
+app.use("/api/wishlist", wishlistRoutes);
 
 app.use("/api/admin", adminRoutes);
 

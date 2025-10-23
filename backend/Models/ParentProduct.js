@@ -7,6 +7,12 @@ const ParentProductSchema = new mongoose.Schema(
     description: { type: String, default: "" },
     details: { type: Object, default: {} },
     tags: { type: [String], index: true, default: [] },
+    pattern: { type: [String], index: true, default: [] },
+    fit: { type: String, index: true, default: null }, // e.g. Slim, Regular, Loose
+    collar: { type: String, index: true, default: null }, // e.g. Round, Polo, Mandarin
+    sleeves: { type: String, index: true, default: null }, // e.g. Short, Long, 3/4
+    material: { type: String, index: true, default: null },
+
     categories: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Category",

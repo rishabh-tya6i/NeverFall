@@ -10,53 +10,35 @@ import ProductCard from "../components/ProductCard";
 import LoadingSpinner from "../components/LoadingSpinner";
 import Pagination from "../components/Pagination";
 import SearchBar from "../components/SearchBar";
-import Link from "next/link";
+import FilterSidebar from "../components/FilterSidebar";
+import { useProductStore } from "../store/useProductStore";
 
 export default function ProductsPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [filters, setFilters] = useState({
-    search: searchParams.get("q") || "",
-    sort: searchParams.get("sort") || "newest",
-    color: searchParams.get("color") || "",
-    size: searchParams.get("size") || "",
-    minPrice: searchParams.get("minPrice") || "",
-    maxPrice: searchParams.get("maxPrice") || "",
-  });
-  const [currentPage, setCurrentPage] = useState(1);
-  const [showFilters, setShowFilters] = useState(false);
+  const {
+    products,
+    loading,
+    filters,
+    page,
+    totalPages,
+    fetchProducts,
+    setFilters,
+  } = useProductStore();
 
-  // Fetch products
-  const { data: productsData, isLoading } = useQuery({
-    queryKey: ["products", filters, currentPage],
-    queryFn: async () => {
-      const params: any = {
-        limit: 12,
-        page: currentPage,
-      };
+  useEffect(() => {
+    const initialFilters = {
+      search: searchParams.get("q") || "",
+      sort: searchParams.get("sort") || "newest",
+      category: searchParams.get("category") || "",
+      priceRange: searchParams.get("price") || "",
+    };
+    fetchProducts(initialFilters, 1);
+  }, []);
 
-      if (filters.search) {
-        const res = await productAPI.search({ q: filters.search, limit: 12 });
-        return res.data;
-      } else if (filters.sort === "featured") {
-        const res = await productAPI.getFeatured({ limit: 12 });
-        return res.data;
-      } else if (filters.sort === "trending") {
-        const res = await productAPI.getTrending({ limit: 12 });
-        return res.data;
-      } else if (filters.sort === "newest") {
-        const res = await productAPI.getNewArrivals({ limit: 12 });
-        return res.data;
-      } else {
-        const res = await productAPI.getByFilter({
-          ...filters,
-          limit: 12,
-          page: currentPage,
-        });
-        return res.data;
-      }
-    },
-  });
+  useEffect(() => {
+    fetchProducts(filters, page);
+  }, [page]);
 
   // Fetch facets for filters
   const { data: facetsData } = useQuery({
@@ -69,23 +51,20 @@ export default function ProductsPage() {
 
   const handleFilterChange = (key: string, value: string) => {
     setFilters({ ...filters, [key]: value });
-    setCurrentPage(1);
   };
 
+  const handlePageChange = (newPage: number) => {
+    useProductStore.setState({ page: newPage });
+  };
+  
   const clearFilters = () => {
     setFilters({
       search: "",
       sort: "newest",
-      color: "",
-      size: "",
-      minPrice: "",
-      maxPrice: "",
+      category: "",
+      priceRange: "",
     });
-    setCurrentPage(1);
   };
-
-  const products = productsData?.items || [];
-  const totalPages = Math.ceil((productsData?.total || 0) / 12);
 
   return (
     <>
@@ -94,18 +73,12 @@ export default function ProductsPage() {
         <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 mb-6">
           <h1 className="text-3xl font-bold">Products</h1>
           <div className="flex flex-col md:flex-row gap-2 w-full md:w-auto">
-            <SearchBar 
+            <SearchBar
               placeholder="Search products..."
               className="w-full md:w-80"
               onSearch={(query) => handleFilterChange("search", query)}
             />
             <div className="flex gap-2">
-              <button
-                onClick={() => setShowFilters(!showFilters)}
-                className="btn btn-outline lg:hidden"
-              >
-                Filters
-              </button>
               <select
                 value={filters.sort}
                 onChange={(e) => handleFilterChange("sort", e.target.value)}
@@ -123,95 +96,15 @@ export default function ProductsPage() {
 
         <div className="grid grid-cols-1 lg:grid-cols-4 gap-6">
           {/* Filters Sidebar */}
-          <div className={`lg:col-span-1 ${showFilters ? "block" : "hidden lg:block"}`}>
-            <div className="card bg-base-200">
-              <div className="card-body">
-                <h3 className="card-title">Filters</h3>
-
-
-                {/* Price Range */}
-                <div className="form-control">
-                  <label className="label">
-                    <span className="label-text">Price Range</span>
-                  </label>
-                  <div className="flex gap-2">
-                    <input
-                      type="number"
-                      placeholder="Min"
-                      className="input input-bordered flex-1"
-                      value={filters.minPrice}
-                      onChange={(e) => handleFilterChange("minPrice", e.target.value)}
-                    />
-                    <input
-                      type="number"
-                      placeholder="Max"
-                      className="input input-bordered flex-1"
-                      value={filters.maxPrice}
-                      onChange={(e) => handleFilterChange("maxPrice", e.target.value)}
-                    />
-                  </div>
-                </div>
-
-                {/* Colors */}
-                {facetsData?.colors && facetsData.colors.length > 0 && (
-                  <div className="form-control">
-                    <label className="label">
-                      <span className="label-text">Colors</span>
-                    </label>
-                    <div className="flex flex-wrap gap-2">
-                      {facetsData.colors.map((color: any, index: number) => (
-                        <button
-                          key={`color-${index}-${typeof color === 'string' ? color : color.color || color.name}`}
-                          onClick={() => {
-                            const colorValue = typeof color === 'string' ? color : color.color || color.name;
-                            handleFilterChange("color", filters.color === colorValue ? "" : colorValue);
-                          }}
-                          className={`btn btn-sm ${
-                            filters.color === (typeof color === 'string' ? color : color.color || color.name) ? "btn-primary" : "btn-outline"
-                          }`}
-                        >
-                          {typeof color === 'string' ? color : color.color || color.name}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                {/* Sizes */}
-                {facetsData?.sizes && facetsData.sizes.length > 0 && (
-                  <div className="form-control">
-                    <label className="label">
-                      <span className="label-text">Sizes</span>
-                    </label>
-                    <div className="flex flex-wrap gap-2">
-                      {facetsData.sizes.map((size: any, index: number) => (
-                        <button
-                          key={`size-${index}-${typeof size === 'string' ? size : size.size || size.name}`}
-                          onClick={() => {
-                            const sizeValue = typeof size === 'string' ? size : size.size || size.name;
-                            handleFilterChange("size", filters.size === sizeValue ? "" : sizeValue);
-                          }}
-                          className={`btn btn-sm ${
-                            filters.size === (typeof size === 'string' ? size : size.size || size.name) ? "btn-primary" : "btn-outline"
-                          }`}
-                        >
-                          {typeof size === 'string' ? size : size.size || size.name}
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
-
-                <button onClick={clearFilters} className="btn btn-outline w-full mt-4">
-                  Clear Filters
-                </button>
-              </div>
-            </div>
-          </div>
-
+          <FilterSidebar
+            filters={filters}
+            handleFilterChange={handleFilterChange}
+            clearFilters={clearFilters}
+            facetsData={facetsData}
+          />
           {/* Products Grid */}
           <div className="lg:col-span-3">
-            {isLoading ? (
+            {loading ? (
               <LoadingSpinner size="lg" text="Loading products..." />
             ) : products.length === 0 ? (
               <div className="text-center py-16">
@@ -231,9 +124,9 @@ export default function ProductsPage() {
 
                 {/* Pagination */}
                 <Pagination
-                  currentPage={currentPage}
+                  currentPage={page}
                   totalPages={totalPages}
-                  onPageChange={setCurrentPage}
+                  onPageChange={handlePageChange}
                   className="mt-8"
                 />
               </>
