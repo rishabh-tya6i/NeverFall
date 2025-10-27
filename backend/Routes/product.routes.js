@@ -12,6 +12,7 @@ import {
   getProductDetails,
   getVariantByKey,
   trackClick,
+  GetAllCategories,
 } from "../Controllers/products.controller.js";
 import { auth } from "../Middlewares/auth.js";
 
@@ -47,6 +48,9 @@ router.get("/trending", getTrending);
 
 //Recommended Products
 router.get("/recommended", auth, getRecommendations);
+
+//Get all categories
+router.get("/getAllCategories", GetAllCategories);
 
 /* -------------------------------------------------------------
    PRODUCT DETAILS

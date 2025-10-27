@@ -587,6 +587,38 @@ export const getRecommendations = async (req, res) => {
   }
 };
 
+// Get all Categories
+// Get all Categories
+export const GetAllCategories = async (req, res) => {
+  try {
+    // Fetch all categories from the database
+    const categories = await Category.find({});
+
+    // If no categories found
+    if (!categories || categories.length === 0) {
+      return res.status(404).json({
+        success: false,
+        message: "No categories found",
+      });
+    }
+
+    // Success response
+    return res.status(200).json({
+      success: true,
+      message: "All categories returned successfully",
+      data: categories,
+    });
+  } catch (error) {
+    console.error("Error fetching categories:", error);
+
+    return res.status(500).json({
+      success: false,
+      message: "Server error while fetching categories",
+      error: error.message,
+    });
+  }
+};
+
 //Working
 
 export const getProductsBySearch = async (req, res) => {

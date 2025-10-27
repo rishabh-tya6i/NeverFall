@@ -1,28 +1,20 @@
-
 import mongoose from "mongoose";
 
-const PincodeServiceabilitySchema = new mongoose.Schema(
+const pincodeServiceabilitySchema = new mongoose.Schema(
   {
-    pincode: {
-      type: String,
-      required: true,
-      unique: true,
-      index: true,
-    },
-    isServiceable: {
-      type: Boolean,
-      default: true,
-    },
-    deliveryDays: {
-      type: Number,
-      required: true,
-    },
-    codAvailable: {
-      type: Boolean,
-      default: true,
-    },
+    pincode: { type: String, required: true, index: true },
+    courier: { type: String, required: true, index: true },
+    deliverable: { type: Boolean, required: true },
+    details: { type: mongoose.Schema.Types.Mixed },
   },
   { timestamps: true }
 );
 
-export default mongoose.model("PincodeServiceability", PincodeServiceabilitySchema);
+pincodeServiceabilitySchema.index({ pincode: 1, courier: 1 }, { unique: true });
+
+const PincodeServiceability = mongoose.model(
+  "PincodeServiceability",
+  pincodeServiceabilitySchema
+);
+
+export default PincodeServiceability;

@@ -14,6 +14,7 @@ export default function OrdersPage() {
   const [statusFilter, setStatusFilter] = useState("all");
   const [mounted, setMounted] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
+  const [orders, setOrders] = useState<any[] | null>(null);
 
   useEffect(() => {
     setMounted(true);
@@ -30,6 +31,7 @@ export default function OrdersPage() {
         limit: 20,
         status: statusFilter === "all" ? undefined : statusFilter,
       });
+      setOrders(res.data);
       return res.data;
     },
     enabled: !!userId,
@@ -115,7 +117,8 @@ export default function OrdersPage() {
     );
   }
 
-  const orders = ordersData?.items || [];
+  // const orders = ordersData?.items || [];
+  console.log(orders);
 
   return (
     <>
@@ -138,7 +141,7 @@ export default function OrdersPage() {
           </select>
         </div>
 
-        {orders.length === 0 ? (
+        {orders && orders.length === 0 ? (
           <div className="text-center py-16">
             <h2 className="text-2xl font-bold mb-4">No orders found</h2>
             <p className="text-gray-600 mb-8">
@@ -152,12 +155,12 @@ export default function OrdersPage() {
           </div>
         ) : (
           <div className="space-y-6">
-            {orders.map((order: any) => (
+            {orders && orders.map((order: any) => (
               <div key={order._id} className="card bg-base-100 shadow">
                 <div className="card-body">
                   <div className="flex justify-between items-start mb-4">
                     <div>
-                      <h3 className="text-lg font-semibold">Order #{order.orderNumber}</h3>
+                      <h3 className="text-lg font-semibold">Order #{order._id}</h3>
                       <p className="text-sm text-gray-600">
                         Placed on {new Date(order.createdAt).toLocaleDateString()}
                       </p>
@@ -166,7 +169,7 @@ export default function OrdersPage() {
                       <div className={`badge ${getStatusBadge(order.status)}`}>
                         {getStatusText(order.status)}
                       </div>
-                      <p className="text-lg font-bold mt-1">₹{order.totalAmount}</p>
+                      <p className="text-lg font-bold mt-1">₹{order?.total}</p>
                     </div>
                   </div>
 
@@ -215,7 +218,7 @@ export default function OrdersPage() {
                     >
                       View Details
                     </Link>
-                    {order.status === "pending" && (
+                    {(order.status === "pending" || order.status === "confirmed" ) && (
                       <button
                         onClick={() => {
                           if (confirm("Are you sure you want to cancel this order?")) {

@@ -7,11 +7,12 @@ import { useRouter } from "next/navigation";
 import { cartAPI, couponAPI } from "@/services/api";
 import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
+import { useOrderStore } from "../store/useOrderStore";
 
 export default function CartPage() {
   const router = useRouter();
   const queryClient = useQueryClient();
-  const [couponCode, setCouponCode] = useState("");
+  const {coupon, setCoupon} = useOrderStore();
   const [appliedCoupon, setAppliedCoupon] = useState<any>(null);
   const [mounted, setMounted] = useState(false);
   const [userId, setUserId] = useState<string | null>(null);
@@ -72,7 +73,7 @@ export default function CartPage() {
       }));
 
       const res = await couponAPI.validate({
-        code: couponCode,
+        code: coupon,
         userId,
         items,
       });
@@ -235,12 +236,12 @@ export default function CartPage() {
                       type="text"
                       placeholder="Enter code"
                       className="input input-bordered join-item flex-1"
-                      value={couponCode}
-                      onChange={(e) => setCouponCode(e.target.value.toUpperCase())}
+                      value={coupon}
+                      onChange={(e) => setCoupon(e.target.value.toUpperCase())}
                     />
                     <button
                       onClick={() => applyCouponMutation.mutate()}
-                      disabled={!couponCode || applyCouponMutation.isPending}
+                      disabled={!coupon || applyCouponMutation.isPending}
                       className="btn join-item btn-primary"
                     >
                       Apply

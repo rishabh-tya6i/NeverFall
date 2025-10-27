@@ -47,12 +47,15 @@ export const productAPI = {
     api.get('/api/products/featured', { params }),
   getTrending: (params: { limit?: number; cursor?: string }) => 
     api.get('/api/products/trending', { params }),
+  getRecommended: (params: { limit?: number; cursor?: string }) =>
+    api.get('/api/products/recommended', { params }),
   getDetails: (idOrSlug: string, params?: { sku?: string }) => 
     api.get(`/api/products/${idOrSlug}`, { params }),
   getVariant: (params: { sku?: string; productId?: string; size?: string }) => 
     api.get('/api/products/variant/lookup', { params }),
   getColorFeed: (params: { limit?: number; cursor?: string; sort?: string; seed?: string }) =>
     api.get('/api/products/color-feed', { params }),
+  getAllCategories: () => api.get('/api/products/getAllCategories'),
 };
 
 // Cart APIs

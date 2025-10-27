@@ -90,7 +90,7 @@ export default function ProductCard({
           <img
             src={product.coverImage || "/placeholder.png"}
             alt={product.title}
-            className="w-full h-64 object-cover"
+            className="w-full h-80 object-cover"
           />
           {product.compareAtFrom && (
             <div className="absolute top-2 left-2">

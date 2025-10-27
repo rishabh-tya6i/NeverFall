@@ -114,7 +114,7 @@ export default function OrderDetailsPage() {
             <li>
               <Link href="/orders">Orders</Link>
             </li>
-            <li>Order #{order.orderNumber}</li>
+            <li>Order #{order?._id}</li>
           </ul>
         </div>
 
@@ -126,7 +126,7 @@ export default function OrderDetailsPage() {
               <div className="card-body">
                 <div className="flex justify-between items-start">
                   <div>
-                    <h1 className="text-2xl font-bold">Order #{order.orderNumber}</h1>
+                    <h1 className="text-2xl font-bold">Order #{order._id}</h1>
                     <p className="text-gray-600">
                       Placed on {new Date(order.createdAt).toLocaleDateString()}
                     </p>
@@ -135,7 +135,7 @@ export default function OrderDetailsPage() {
                     <div className={`badge ${getStatusBadge(order.status)} text-lg`}>
                       {getStatusText(order.status)}
                     </div>
-                    <p className="text-2xl font-bold mt-2">₹{order.totalAmount}</p>
+                    <p className="text-2xl font-bold mt-2">₹{order.total}</p>
                   </div>
                 </div>
               </div>
@@ -235,7 +235,7 @@ export default function OrderDetailsPage() {
                   <div className="divider"></div>
                   <div className="flex justify-between text-xl font-bold">
                     <span>Total</span>
-                    <span>₹{order.totalAmount}</span>
+                    <span>₹{order.total}</span>
                   </div>
                   <div className="flex justify-between text-sm text-gray-600">
                     <span>Payment Method</span>
@@ -243,7 +243,7 @@ export default function OrderDetailsPage() {
                   </div>
                   <div className="flex justify-between text-sm text-gray-600">
                     <span>Payment Status</span>
-                    <span className="capitalize">{order.paymentStatus || "N/A"}</span>
+                    <span className="capitalize">{order.payments[0].status == 'cod_pending' ? 'Pending' : order.payments[0].status || "N/A"}</span>
                   </div>
                 </div>
               </div>
@@ -297,7 +297,7 @@ export default function OrderDetailsPage() {
                   </div>
                   <div className="flex justify-between">
                     <span>Total</span>
-                    <span className="font-bold">₹{order.totalAmount}</span>
+                    <span className="font-bold">₹{order.total}</span>
                   </div>
                 </div>
               </div>

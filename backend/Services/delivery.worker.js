@@ -10,7 +10,7 @@ import { redisBullMQ as redis } from "../lib/redis.js";
 import Order from "../Models/Order.js";
 import ReturnRequest from "../Models/ReturnRequest.js";
 import ExchangeRequest from "../Models/ExchangeRequest.js";
-import { delhivery as delhiveryAPI } from "../Controllers/delivery.controller.js";
+import { delhiveryAPI } from "../Controllers/delivery.controller.js";
 import logger from "../utils/logger.js"; // keep as-is
 
 const log = logger || console;

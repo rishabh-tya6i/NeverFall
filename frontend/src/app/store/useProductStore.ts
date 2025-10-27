@@ -29,26 +29,13 @@ export const useProductStore = create<ProductState>((set, get) => ({
   fetchProducts: async (filters, page = 1) => {
     set({ loading: true });
     try {
-      let res;
       const params = {
+        ...filters,
         limit: 12,
         page,
       };
-
-      if (filters.search) {
-        res = await productAPI.search({ q: filters.search, limit: 12 });
-      } else if (filters.sort === "featured") {
-        res = await productAPI.getFeatured({ limit: 12 });
-      } else if (filters.sort === "trending") {
-        res = await productAPI.getTrending({ limit: 12 });
-      } else if (filters.sort === "newest") {
-        res = await productAPI.getNewArrivals({ limit: 12 });
-      } else {
-        res = await productAPI.getByFilter({
-          ...filters,
-          ...params,
-        });
-      }
+      
+      const res = await productAPI.getByFilter(params);
       
       set({
         products: res.data.items || [],
@@ -64,9 +51,8 @@ export const useProductStore = create<ProductState>((set, get) => ({
   },
 
   setFilters: (newFilters) => {
-    const { filters, fetchProducts } = get();
+    const { filters } = get();
     const updatedFilters = { ...filters, ...newFilters };
-    set({ filters: updatedFilters });
-    fetchProducts(updatedFilters, 1); // Reset to page 1 on filter change
+    set({ filters: updatedFilters, page: 1 }); // Reset to page 1 on filter change
   },
 }));

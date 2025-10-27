@@ -3,36 +3,44 @@ import axios from "axios";
 import crypto from "crypto";
 import ms from "ms";
 import Order from "../Models/Order.js";
-import Delivery from "../Models/Delivery.js"; // ensure this model exists
+import Delivery from "../Models/Delivery.js";
 import ReturnRequest from "../Models/ReturnRequest.js";
 import ExchangeRequest from "../Models/ExchangeRequest.js";
 import User from "../Models/User.js";
-import { cacheGet, cacheSet, cacheDel } from "../lib/cache.js"; // added cacheDel
-import { deliveryQueue } from "../Services/delivery.worker.js"; // your job queue (real queue)
-import { redis } from "../lib/redis.js"; // direct redis only as fallback
+import { cacheGet, cacheSet, cacheDel } from "../lib/cache.js";
+import { deliveryQueue } from "../Services/delivery.worker.js";
+import { redis } from "../lib/redis.js";
 import mongoose from "mongoose";
 import { sendSms } from "../Services/phone.service.js";
+import DelhiveryConfig from "../Models/DelhiveryConfig.js";
+import PickupLocation from "../Models/PickupLocation.js";
+import PincodeServiceability from "../Models/PincodeServiceability.js";
 
 const OTP_TTL_SECONDS = Number(process.env.OTP_TTL_SECONDS) || 10 * 60; // 10 minutes
 const OTP_LENGTH = Number(process.env.OTP_LENGTH) || 6;
-const DELHIVERY_TOKEN = process.env.DELHIVERY_TOKEN;
-const DELHIVERY_BASE_URL =
-  process.env.DELHIVERY_BASE_URL || "https://track.delhivery.com";
-const IS_STAGING = process.env.DELHIVERY_STAGING === "true";
+
+// helper: get Delhivery config from DB
+const getDelhiveryConfig = async () => {
+  const config = await DelhiveryConfig.findOne({ name: "default" });
+  if (!config) {
+    throw new Error("Delhivery config not found in database");
+  }
+  return config;
+};
 
 // helper: axios instance
-export const delhivery = axios.create({
-  baseURL: IS_STAGING
-    ? process.env.DELHIVERY_STAGING_URL ||
-      "https://staging-express.delhivery.com"
-    : DELHIVERY_BASE_URL,
-  headers: {
-    Authorization: `Token ${DELHIVERY_TOKEN}`,
-    Accept: "application/json",
-    "Content-Type": "application/json",
-  },
-  timeout: 30_000,
-});
+export const getDelhiveryInstance = async () => {
+  const config = await getDelhiveryConfig();
+  return axios.create({
+    baseURL: config.isStaging ? config.stagingUrl : config.baseUrl,
+    headers: {
+      Authorization: `Token ${config.token}`,
+      Accept: "application/json",
+      "Content-Type": "application/json",
+    },
+    timeout: 30_000,
+  });
+};
 
 // Real enqueue helper (use job name = type)
 const enqueueJob = async (type, payload = {}, opts = {}) => {
@@ -68,6 +76,7 @@ function verifyHashedOtp(otp, hashed) {
 // helpers for Delhivery calls (thin wrappers)
 async function delhiveryGet(path, params = {}) {
   try {
+    const delhivery = await getDelhiveryInstance();
     const resp = await delhivery.get(path, { params });
     return resp.data;
   } catch (err) {
@@ -81,6 +90,7 @@ async function delhiveryGet(path, params = {}) {
 }
 async function delhiveryPost(path, body = {}, params = {}) {
   try {
+    const delhivery = await getDelhiveryInstance();
     const resp = await delhivery.post(path, body, { params });
     return resp.data;
   } catch (err) {
@@ -94,6 +104,7 @@ async function delhiveryPost(path, body = {}, params = {}) {
 }
 async function delhiveryPut(path, body = {}, params = {}) {
   try {
+    const delhivery = await getDelhiveryInstance();
     const resp = await delhivery.put(path, body, { params });
     return resp.data;
   } catch (err) {
@@ -149,10 +160,12 @@ export const checkPincodeDeliverabilityForDelhivery = async (req, res) => {
       console.warn("cacheGet error for pincode", cacheKey, e.message || e);
     }
 
-    // 2) Try local DB collection (collection name: pincode_serviceability)
+    // 2) Try local DB
     try {
-      const coll = mongoose.connection.collection("pincode_serviceability");
-      const record = await coll.findOne({ pin, courier: COURIER });
+      const record = await PincodeServiceability.findOne({
+        pincode: pin,
+        courier: COURIER,
+      });
       if (record) {
         // cache result for 24h
         try {
@@ -177,11 +190,10 @@ export const checkPincodeDeliverabilityForDelhivery = async (req, res) => {
         });
       }
     } catch (e) {
-      console.warn("pincode_serviceability DB check failed", e.message || e);
+      console.warn("PincodeServiceability DB check failed", e.message || e);
     }
 
     // 3) Fallback -> call Delhivery API for serviceability
-    // Configure path via env, fallback to '/api/pincode/check'
     const DELHIVERY_PINCODE_PATH =
       process.env.DELHIVERY_PINCODE_PATH || "/api/pincode/check";
 
@@ -243,14 +255,11 @@ export const checkPincodeDeliverabilityForDelhivery = async (req, res) => {
           }
 
           try {
-            const coll = mongoose.connection.collection(
-              "pincode_serviceability"
-            );
-            await coll.updateOne(
-              { pin, courier: COURIER },
+            await PincodeServiceability.updateOne(
+              { pincode: pin, courier: COURIER },
               {
                 $set: {
-                  pin,
+                  pincode: pin,
                   courier: COURIER,
                   deliverable,
                   details,
@@ -261,7 +270,7 @@ export const checkPincodeDeliverabilityForDelhivery = async (req, res) => {
             );
           } catch (e) {
             console.warn(
-              "persist pincode_serviceability failed",
+              "persist PincodeServiceability failed",
               e.message || e
             );
           }
@@ -297,7 +306,7 @@ export const checkPincodeDeliverabilityForDelhivery = async (req, res) => {
       pin,
       deliverable: null,
       via: "unknown",
-      note: "Serviceability unknown: no cached/db/delhivery result. Consider adding pin to pincode_serviceability collection.",
+      note: "Serviceability unknown: no cached/db/delhivery result. Consider adding pin to PincodeServiceability collection.",
     });
   } catch (err) {
     console.error("checkPincodeDeliverabilityForDelhivery err", err);
@@ -330,11 +339,14 @@ function extractWaybillFromDelhiveryResp(dlResp) {
 // 1) dispatchOrder
 export const dispatchOrder = async (req, res) => {
   try {
-    const { orderId, pickup_location, preferredWaybill } = req.body;
-    if (!orderId || !pickup_location) {
-      return res
-        .status(400)
-        .json({ error: "orderId and pickup_location required" });
+    const { orderId, preferredWaybill } = req.body;
+    if (!orderId) {
+      return res.status(400).json({ error: "orderId required" });
+    }
+
+    const pickup_location = await PickupLocation.findOne({ isDefault: true });
+    if (!pickup_location) {
+      return res.status(500).json({ error: "Default pickup location not found" });
     }
 
     const order = await Order.findById(orderId).lean();
@@ -381,7 +393,7 @@ export const dispatchOrder = async (req, res) => {
       order: order._id,
       client: order.user,
       status: "created",
-      pickup_location,
+      pickup_location: pickup_location.name,
       payment_mode: shipment.payment_mode,
       attemptCount: 0,
       history: [{ status: "created", at: new Date(), note: "Created locally" }],
@@ -395,7 +407,7 @@ export const dispatchOrder = async (req, res) => {
 
     // Prepare Delhivery manifest payload
     const body = {
-      pickup_location: { name: pickup_location },
+      pickup_location: { name: pickup_location.name },
       shipments: [shipment],
     };
 
@@ -495,24 +507,30 @@ export const createPickupRequest = async (req, res) => {
     const {
       pickup_date,
       pickup_time,
-      pickup_location,
+      pickup_location_name,
       expected_package_count,
     } = req.body;
     if (
       !pickup_date ||
       !pickup_time ||
-      !pickup_location ||
+      !pickup_location_name ||
       !expected_package_count
     ) {
       return res.status(400).json({
         error:
-          "pickup_date, pickup_time, pickup_location, expected_package_count required",
+          "pickup_date, pickup_time, pickup_location_name, expected_package_count required",
       });
     }
+
+    const pickup_location = await PickupLocation.findOne({ name: pickup_location_name });
+    if (!pickup_location) {
+      return res.status(404).json({ error: "Pickup location not found" });
+    }
+
     const body = {
       pickup_time,
       pickup_date,
-      pickup_location,
+      pickup_location: pickup_location.name,
       expected_package_count,
     };
     const resp = await delhiveryPost("/fm/request/new/", body);
@@ -625,9 +643,9 @@ export const generateDeliveryOtp = async (req, res) => {
     } catch (e) {
       // ignore
     }
-
+    const config = await getDelhiveryConfig();
     // In staging, return otp for testing. In prod do not return.
-    if (IS_STAGING) return res.json({ ok: true, otpTest: otp, sentAt: now });
+    if (config.isStaging) return res.json({ ok: true, otpTest: otp, sentAt: now });
     return res.json({
       ok: true,
       message: "OTP generated and sent (if phone available).",
@@ -688,7 +706,7 @@ export const verifyDeliveryOtp = async (req, res) => {
     delivery.history.push({
       status: "otp_verified",
       at: new Date(),
-      note: `OTP verified by agent ${agentId || "unknown"}`,
+      note: `OTP verified by agent ${agentId || "unknown"}`
     });
     delivery.status = "delivered";
     delivery.deliveredAt = new Date();
@@ -976,15 +994,35 @@ export const getShipmentStatus = async (req, res) => {
   }
 };
 
-export default {
-  dispatchOrder,
-  checkPincodeDeliverabilityForDelhivery,
-  createPickupRequest,
-  cancelShipment,
-  generateDeliveryOtp,
-  verifyDeliveryOtp,
-  delhiveryScanWebhook,
-  delhiveryDocWebhook,
-  triggerNdr,
-  getShipmentStatus,
+export const delhiveryAPI = {
+  createShipmentLabel: async (orderId, deliveryId) => {
+    const delhivery = await getDelhiveryInstance();
+    // Placeholder implementation
+    console.log("Creating shipment label for order:", orderId, "delivery:", deliveryId);
+    return { ok: true, message: "Label created" };
+  },
+  downloadDocuments: async (waybill, payload) => {
+    const delhivery = await getDelhiveryInstance();
+    // Placeholder implementation
+    console.log("Downloading documents for waybill:", waybill, "payload:", payload);
+    return { ok: true, message: "Documents downloaded" };
+  },
+  scheduleRetry: async (waybill, payload) => {
+    const delhivery = await getDelhiveryInstance();
+    // Placeholder implementation
+    console.log("Scheduling retry for waybill:", waybill, "payload:", payload);
+    return { ok: true, message: "Retry scheduled" };
+  },
+  sendOTPToCustomer: async (userId, deliveryId, otp, status) => {
+    const delhivery = await getDelhiveryInstance();
+    // Placeholder implementation
+    console.log("Sending OTP to customer:", userId, "delivery:", deliveryId, "otp:", otp, "status:", status);
+    return { ok: true, message: "OTP sent" };
+  },
+  reconcileWithDocs: async (deliveryId, waybill, docType) => {
+    const delhivery = await getDelhiveryInstance();
+    // Placeholder implementation
+    console.log("Reconciling with docs for delivery:", deliveryId, "waybill:", waybill, "docType:", docType);
+    return { ok: true, message: "Reconciled" };
+  },
 };
