@@ -10,6 +10,7 @@ const CategorySchema = new mongoose.Schema(
       default: null,
     },
     path: { type: String, index: true }, // e.g. "men/tops/hoodies"
+    image: { type: String, default: null },
     sortOrder: { type: Number, default: 0 },
     isActive: { type: Boolean, default: true },
   },

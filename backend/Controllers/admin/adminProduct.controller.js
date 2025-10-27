@@ -170,6 +170,8 @@ export const getAllProductsAdmin = async (req, res) => {
  * This is a complex operation and should be transactional.
  */
 export const createProduct = async (req, res) => {
+  console.log('req.body', req.body);
+  console.log('req.files', req.files);
   const session = await mongoose.startSession();
   session.startTransaction();
   try {
@@ -183,11 +185,13 @@ export const createProduct = async (req, res) => {
       colorLabel,
       variants,
       images, // Now expecting [{url, alt}]
-      coverImage,
       collections,
       primaryCategoryId,
       isTrending,
     } = req.body;
+
+    const coverImage = req.files.coverImage ? req.files.coverImage[0].path : '';
+    const imageFiles = req.files.imageFiles ? req.files.imageFiles.map(file => ({ url: file.path, alt: '' })) : [];
 
     // Validation
     if (!title || !slug || !color || !colorLabel || !coverImage) {
@@ -207,6 +211,8 @@ export const createProduct = async (req, res) => {
             alt: img.alt || '',
           }))
       : [];
+
+    const finalImages = [...imageArray, ...imageFiles];
 
     // Validate collections
     const collectionsArray = Array.isArray(collections)
@@ -260,7 +266,7 @@ export const createProduct = async (req, res) => {
       slug: productSlug,
       color: color.toLowerCase(),
       colorLabel,
-      images: imageArray,
+      images: finalImages,
       coverImage,
       priceFrom,
       compareAtFrom,
@@ -313,6 +319,15 @@ export const updateProduct = async (req, res) => {
 
   try {
     const updateData = { ...req.body };
+
+    if (req.files.coverImage) {
+      updateData.coverImage = req.files.coverImage[0].path;
+    }
+
+    if (req.files.imageFiles) {
+      const newImages = req.files.imageFiles.map(file => ({ url: file.path, alt: '' }));
+      updateData.images = [...(updateData.images || []), ...newImages];
+    }
 
     // Validate and sanitize images if provided
     if (updateData.images !== undefined) {
@@ -504,5 +519,17 @@ export const bulkUpdateStock = async (req, res) => {
       .json({ message: "Bulk stock update failed", error: error.message });
   } finally {
     session.endSession();
+  }
+};
+
+export const getAllParentProducts = async (req, res) => {
+  try {
+    const parentProducts = await ParentProduct.find({}).lean();
+    res.json({
+      items: parentProducts,
+      total: parentProducts.length,
+    });
+  } catch (error) {
+    res.status(500).json({ message: "Error fetching parent products", error });
   }
 };

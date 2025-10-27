@@ -142,7 +142,7 @@ export default function ProductDetailPage() {
           <div>
             <div className="mb-4">
               <img
-                src={images[selectedImage]?.url || product.product.coverImage || "/placeholder.png"}
+                src={`http://localhost:8080/${images[selectedImage]?.url}` || product.product.coverImage || "/placeholder.png"}
                 alt={product.product.title}
                 className="w-full h-[500px] object-cover rounded-lg"
               />
@@ -157,7 +157,7 @@ export default function ProductDetailPage() {
                   }`}
                 >
                   <img
-                    src={img.url}
+                    src={`http://localhost:8080/${img.url}`}
                     alt={`${product.product.title} ${idx + 1}`}
                     className="w-20 h-20 object-cover rounded"
                   />

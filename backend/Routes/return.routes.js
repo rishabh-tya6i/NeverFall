@@ -12,7 +12,7 @@ const router = express.Router();
 // Create a new return request
 router.post(
   "/create",
-  isAdmin, // logged-in users only
+  auth, // logged-in users only
   returnController.createReturnRequest
 );
 

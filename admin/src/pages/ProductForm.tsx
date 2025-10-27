@@ -1,8 +1,9 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import { useForm } from 'react-hook-form';
 import { productApi } from '@/api/products';
+import { categoryApi } from '@/api/categories';
 import toast from 'react-hot-toast';
-import { Product, ProductImage } from '@/types';
+import { Product, ProductImage, Category, ParentProduct } from '@/types';
 import { Plus, X, Trash2 } from 'lucide-react';
 
 interface ProductFormProps {
@@ -17,7 +18,7 @@ interface FormData {
   description?: string;
   color: string;
   colorLabel: string;
-  coverImage: string;
+  coverImage: FileList;
   tags?: string;
   primaryCategoryId?: string;
   parent?: string;
@@ -31,6 +32,8 @@ const ProductForm: React.FC<ProductFormProps> = ({
   onCancel,
 }) => {
   const [loading, setLoading] = useState(false);
+  const [categories, setCategories] = useState<Category[]>([]);
+  const [parentProducts, setParentProducts] = useState<ParentProduct[]>([]);
   
   // Images state - array of {url, alt}
   const [images, setImages] = useState<ProductImage[]>(
@@ -55,7 +58,6 @@ const ProductForm: React.FC<ProductFormProps> = ({
           slug: product.slug,
           color: product.color,
           colorLabel: product.colorLabel,
-          coverImage: product.coverImage,
           primaryCategoryId: product.primaryCategoryId,
           collections: product.collections?.join(', '),
           isTrending: product.isTrending,
@@ -65,37 +67,80 @@ const ProductForm: React.FC<ProductFormProps> = ({
         },
   });
 
+  useEffect(() => {
+    const fetchInitialData = async () => {
+      try {
+        const [categoriesData, parentProductsData] = await Promise.all([
+          categoryApi.getCategories(),
+          productApi.getParentProducts(),
+        ]);
+        setCategories(categoriesData);
+        setParentProducts(parentProductsData);
+      } catch (error) {
+        toast.error('Failed to fetch initial data');
+      }
+    };
+    fetchInitialData();
+  }, []);
+
+  const addImage = () => {
+    setImages([...images, { url: '', alt: '' }]);
+  };
+
+  const removeImage = (index: number) => {
+    setImages(images.filter((_, i) => i !== index));
+  };
+
+  const [imageFiles, setImageFiles] = useState<File[]>([]);
+
+  const updateImage = (index: number, field: 'url' | 'alt', value: string | File) => {
+    const updated = [...images];
+    if (field === 'url' && value instanceof File) {
+      const newImageFiles = [...imageFiles];
+      newImageFiles[index] = value;
+      setImageFiles(newImageFiles);
+      updated[index] = { ...updated[index], url: value.name };
+    } else if (typeof value === 'string') {
+      updated[index] = { ...updated[index], [field]: value };
+    }
+    setImages(updated);
+  };
+
   const onSubmit = async (data: FormData) => {
     setLoading(true);
     try {
-      // Parse collections
-      const collectionsArray = data.collections
-        ? data.collections
-            .split(',')
-            .map((c) => c.trim())
-            .filter((c) => c.length > 0)
-        : [];
+      const formData = new FormData();
+      formData.append('title', data.title);
+      formData.append('slug', data.slug);
+      formData.append('description', data.description || '');
+      formData.append('color', data.color);
+      formData.append('colorLabel', data.colorLabel);
+      if (data.coverImage && data.coverImage.length > 0) {
+        formData.append('coverImage', data.coverImage[0]);
+      }
+      formData.append('collections', data.collections || '');
+      formData.append('primaryCategoryId', data.primaryCategoryId || '');
+      formData.append('parent', data.parent || '');
+      formData.append('isTrending', data.isTrending ? 'true' : 'false');
 
-      // Validate images
-      const validImages = images.filter(img => img.url && img.url.trim().length > 0);
+      imageFiles.forEach((file) => {
+        if (file) {
+          formData.append('imageFiles', file);
+        }
+      });
 
-      const payload = {
-        title: data.title,
-        slug: data.slug,
-        description: data.description || '',
-        color: data.color,
-        colorLabel: data.colorLabel,
-        coverImage: data.coverImage,
-        images: validImages,
-        collections: collectionsArray,
-        primaryCategoryId: data.primaryCategoryId || null,
-        parent: data.parent || null,
-        isTrending: data.isTrending || false,
-        variants: variants.filter(v => v.size && v.sku),
-      };
+      variants.forEach((variant, index) => {
+        if (variant.size && variant.sku) {
+          formData.append(`variants[${index}][size]`, variant.size);
+          formData.append(`variants[${index}][sku]`, variant.sku);
+          formData.append(`variants[${index}][price]`, variant.price.toString());
+          formData.append(`variants[${index}][compareAtPrice]`, variant.compareAtPrice.toString());
+          formData.append(`variants[${index}][stock]`, variant.stock.toString());
+        }
+      });
 
       if (product) {
-        await productApi.updateProduct(product._id, payload);
+        await productApi.updateProduct(product._id, formData);
         toast.success('Product updated successfully');
       } else {
         if (variants.length === 0 || !variants.some(v => v.size && v.sku)) {
@@ -104,7 +149,7 @@ const ProductForm: React.FC<ProductFormProps> = ({
           return;
         }
 
-        await productApi.createProduct(payload);
+        await productApi.createProduct(formData);
         toast.success('Product created successfully');
       }
       onSuccess();
@@ -114,21 +159,6 @@ const ProductForm: React.FC<ProductFormProps> = ({
     } finally {
       setLoading(false);
     }
-  };
-
-  // Image management
-  const addImage = () => {
-    setImages([...images, { url: '', alt: '' }]);
-  };
-
-  const removeImage = (index: number) => {
-    setImages(images.filter((_, i) => i !== index));
-  };
-
-  const updateImage = (index: number, field: 'url' | 'alt', value: string) => {
-    const updated = [...images];
-    updated[index] = { ...updated[index], [field]: value };
-    setImages(updated);
   };
 
   // Variant management
@@ -211,12 +241,23 @@ const ProductForm: React.FC<ProductFormProps> = ({
 
         <div className="md:col-span-2">
           <label className="block text-sm font-medium text-gray-700">
-            Cover Image URL *
+            Description
+          </label>
+          <textarea
+            {...register('description')}
+            className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-primary-500 focus:outline-none"
+            placeholder="Product Description"
+          />
+        </div>
+
+        <div className="md:col-span-2">
+          <label className="block text-sm font-medium text-gray-700">
+            Cover Image *
           </label>
           <input
+            type="file"
             {...register('coverImage', { required: 'Cover image is required' })}
             className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-primary-500 focus:outline-none"
-            placeholder="https://example.com/image.jpg"
           />
           {errors.coverImage && (
             <p className="mt-1 text-sm text-red-600">{errors.coverImage.message}</p>
@@ -236,24 +277,36 @@ const ProductForm: React.FC<ProductFormProps> = ({
 
         <div>
           <label className="block text-sm font-medium text-gray-700">
-            Category ID
+            Category
           </label>
-          <input
+          <select
             {...register('primaryCategoryId')}
             className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-primary-500 focus:outline-none"
-            placeholder="Category ObjectId"
-          />
+          >
+            <option value="">Select a category</option>
+            {categories.map((cat) => (
+              <option key={cat._id} value={cat._id}>
+                {cat.name}
+              </option>
+            ))}
+          </select>
         </div>
 
         <div>
           <label className="block text-sm font-medium text-gray-700">
-            Parent Product ID
+            Parent Product
           </label>
-          <input
+          <select
             {...register('parent')}
             className="mt-1 block w-full rounded-lg border border-gray-300 px-3 py-2 focus:border-primary-500 focus:outline-none"
-            placeholder="Parent Product ObjectId (optional)"
-          />
+          >
+            <option value="">Select a parent product</option>
+            {parentProducts.map((p) => (
+              <option key={p._id} value={p._id}>
+                {p.title}
+              </option>
+            ))}
+          </select>
           <p className="mt-1 text-xs text-gray-500">
             Leave empty to create a new parent product
           </p>
@@ -298,13 +351,12 @@ const ProductForm: React.FC<ProductFormProps> = ({
           >
             <div className="md:col-span-7">
               <label className="block text-xs font-medium text-gray-700">
-                Image URL
+                Image
               </label>
               <input
-                value={image.url}
-                onChange={(e) => updateImage(index, 'url', e.target.value)}
+                type="file"
+                onChange={(e) => updateImage(index, 'url', e.target.files ? e.target.files[0] : '')}
                 className="mt-1 block w-full rounded border border-gray-300 px-2 py-1 text-sm"
-                placeholder="https://example.com/image.jpg"
               />
             </div>
             <div className="md:col-span-4">

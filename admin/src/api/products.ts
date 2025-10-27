@@ -11,6 +11,12 @@ export const productApi = {
     return data;
   },
 
+  // Get all parent products
+  getParentProducts: async (): Promise<ParentProduct[]> => {
+    const { data } = await axios.get('/admin/products/parents');
+    return data.items;
+  },
+
   // Create parent product
   createParentProduct: async (payload: Partial<ParentProduct>) => {
     const { data } = await axios.post('/admin/products/parent', payload);
@@ -19,13 +25,21 @@ export const productApi = {
 
   // Create product
   createProduct: async (payload: any) => {
-    const { data } = await axios.post('/admin/products', payload);
+    const { data } = await axios.post('/admin/products', payload, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
     return data;
   },
 
   // Update product
   updateProduct: async (id: string, payload: Partial<Product>) => {
-    const { data } = await axios.put(`/admin/products/${id}`, payload);
+    const { data } = await axios.put(`/admin/products/${id}`, payload, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
     return data;
   },
 

@@ -168,7 +168,7 @@ export async function calculateOrderTotals(items, couponCode, session, userId) {
           },
         })
         .session(session);
-        console.log("variant is", variant);
+      console.log("variant is", variant);
 
       if (variant) await cacheSet(cacheKey, variant, 300);
     }
@@ -433,6 +433,7 @@ export const createOrder = async (req, res) => {
       const {
         items: validatedItems,
         subtotal,
+        discountAmount,
         total,
         coupon,
       } = await calculateOrderTotals(items, couponCode, session, userId);
@@ -453,6 +454,7 @@ export const createOrder = async (req, res) => {
             user: userId,
             items: validatedItems,
             subtotal,
+            discountAmount,
             total,
             coupon,
             shippingAddress,
@@ -615,6 +617,12 @@ export const createPaymentSession = async (req, res) => {
 
         paymentSession.status = "completed";
         paymentSession.completedAt = new Date();
+        // const cart = await Cart.findOne({ user: userId }).session(session);
+        // if (cart) {
+        //   cart.items = [];
+        //   cart.totalValue = 0;
+        //   await cart.save({ session });
+        // }
         await paymentSession.save({ session });
       } else {
         // --- Online payment flow ---
@@ -665,7 +673,6 @@ export const createPaymentSession = async (req, res) => {
 
     // --- 11. Send response AFTER transaction and lock release ---
     res.json(result);
-
   } catch (error) {
     logger.error("Payment session creation failed", {
       error: error.message,

@@ -82,7 +82,7 @@ const Navbar = () => {
             <Link href="/" className="btn btn-ghost text-xl">NeverFall</Link>
         </div>
 
-        <ul className="lg:navbar-center md:hidden sm:hidden menu menu-vertical lg:menu-horizontal bg-base-200 rounded-box">
+        <ul className="lg:navbar-center menu menu-vertical lg:menu-horizontal bg-base-200 rounded-box">
             <li><Link href='/products'>Products</Link></li>
             <li><Link href='/contact'>Contact</Link></li>
         </ul>

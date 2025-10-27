@@ -13,6 +13,7 @@ export default function ReturnPage() {
   const queryClient = useQueryClient();
   const orderId = searchParams.get("orderId");
   const [mounted, setMounted] = useState(false);
+  const [index, setIndex] = useState(0);
 
   useEffect(() => {
     setMounted(true);
@@ -74,6 +75,7 @@ export default function ReturnPage() {
 
     const returnData = {
       orderId,
+      orderItemIndex: index,
       items: selectedItems.map((itemId) => {
         const item = order.items.find((i: any) => i._id === itemId);
         return {
@@ -176,13 +178,13 @@ export default function ReturnPage() {
             <div className="card-body">
               <h2 className="card-title mb-4">Select Items to Return</h2>
               <div className="space-y-4">
-                {order.items.map((item: any) => (
+                {order.items.map((item: any , index: number) => (
                   <div key={item._id} className="flex items-center gap-4 p-4 bg-base-200 rounded-lg">
                     <input
                       type="checkbox"
                       className="checkbox checkbox-primary"
                       checked={selectedItems.includes(item._id)}
-                      onChange={() => handleItemToggle(item._id)}
+                      onChange={() => {handleItemToggle(item._id); setIndex(index);}}
                     />
                     <img
                       src={item.product?.coverImage || "/placeholder.png"}

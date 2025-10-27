@@ -64,11 +64,43 @@ const listSelect = {
   purchases: 1,
 };
 
-const buildFilter = (q) => {
+const buildFilter = async (q) => {
   const filter = {};
 
-  // categories? (denormalized on Product via parent is not here; skip unless you store categories on Product)
-  // If Product also has categories, plug them here; otherwise facet on parent route.
+  // Handle category filtering by primaryCategoryId
+  const categories = toArr(q.categories);
+  if (categories.length) {
+    // Convert category names/slugs to ObjectIds
+    const categoryIds = [];
+    const categoryNames = [];
+
+    for (const cat of categories) {
+      if (mongoose.Types.ObjectId.isValid(cat)) {
+        categoryIds.push(new mongoose.Types.ObjectId(cat));
+      } else {
+        categoryNames.push(cat);
+      }
+    }
+
+    // If we have category names/slugs, resolve them to ObjectIds
+    if (categoryNames.length) {
+      const resolvedCategories = await Category.find({
+        $or: [
+          { name: { $in: categoryNames } },
+          { slug: { $in: categoryNames } },
+        ],
+      })
+        .select("_id")
+        .lean();
+
+      const resolvedIds = resolvedCategories.map((cat) => cat._id);
+      categoryIds.push(...resolvedIds);
+    }
+
+    if (categoryIds.length) {
+      filter.primaryCategoryId = { $in: categoryIds };
+    }
+  }
 
   const colors = toArr(q.colors);
   if (colors.length) filter.color = { $in: colors.map((c) => c.toLowerCase()) };
@@ -367,7 +399,7 @@ export const getProductsByFilter = async (req, res) => {
   const limit = Math.min(60, Math.max(1, toNum(req.query.limit, 24)));
   const cursor = decodeCursor(req.query.cursor);
   const sortCfg = buildSort(req.query.sort);
-  const filter = buildFilter(req.query);
+  const filter = await buildFilter(req.query);
 
   const key = cacheKeyFromReq(req, "prd:filter:cursor");
   const cached = await redisGet(key);
@@ -674,7 +706,7 @@ export const getProductsBySearch = async (req, res) => {
 
 export const getFacets = async (req, res) => {
   console.log("getFacets called");
-  const filter = buildFilter(req.query);
+  const filter = await buildFilter(req.query);
   const key = cacheKeyFromReq(req, "prd:facets");
   const cached = await redisGet(key);
   if (cached) return res.json(cached);
@@ -692,6 +724,27 @@ export const getFacets = async (req, res) => {
           { $unwind: "$availableSizes" },
           { $group: { _id: "$availableSizes", count: { $sum: 1 } } },
           { $sort: { _id: 1 } },
+        ],
+        categories: [
+          { $match: { primaryCategoryId: { $ne: null } } },
+          {
+            $lookup: {
+              from: "categories",
+              localField: "primaryCategoryId",
+              foreignField: "_id",
+              as: "category",
+            },
+          },
+          { $unwind: "$category" },
+          {
+            $group: {
+              _id: "$primaryCategoryId",
+              name: { $first: "$category.name" },
+              slug: { $first: "$category.slug" },
+              count: { $sum: 1 },
+            },
+          },
+          { $sort: { count: -1 } },
         ],
         tags: [
           { $unwind: "$tags" },
@@ -715,6 +768,13 @@ export const getFacets = async (req, res) => {
   const payload = {
     colors: facet?.colors?.map((x) => ({ color: x._id, count: x.count })) ?? [],
     sizes: facet?.sizes?.map((x) => ({ size: x._id, count: x.count })) ?? [],
+    categories:
+      facet?.categories?.map((x) => ({
+        categoryId: x._id,
+        name: x.name,
+        slug: x.slug,
+        count: x.count,
+      })) ?? [],
     tags: facet?.tags?.map((x) => ({ tag: x._id, count: x.count })) ?? [],
     publishRange: facet?.publishRange?.[0] ?? null,
   };
