@@ -40,14 +40,13 @@ if (!fs.existsSync(uploadsDir)) {
 const isProd = process.env.PRODUCTION === "true";
 app.use(
   cors({
-    origin: process.env.CLIENT_URL || "http://localhost:3000",
+    origin: ['http://13.61.7.132:3000', 'http://13.61.7.132:5173'],
     credentials: true,
   })
 );
 
 app.use(express.json({ limit: "1mb" }));
 app.use(express.urlencoded({ extended: false }));
-app.use(bodyParser.json());
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(cookieParser());
 app.use("/uploads", express.static(path.join(__dirname, "uploads")));

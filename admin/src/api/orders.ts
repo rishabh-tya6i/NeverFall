@@ -11,13 +11,13 @@ export const orderApi = {
     sortBy?: string;
     sortOrder?: 'asc' | 'desc';
   }): Promise<PaginatedResponse<Order>> => {
-    const { data } = await axios.get('/admin/orders', { params });
+    const { data } = await axios.get('api/admin/orders', { params });
     return data;
   },
 
   // Update order status
   updateOrderStatus: async (id: string, status: string) => {
-    const { data } = await axios.patch(`/admin/orders/${id}/status`, {
+    const { data } = await axios.patch(`api/admin/orders/${id}/status`, {
       status,
     });
     return data;
@@ -25,7 +25,7 @@ export const orderApi = {
 
   // Approve refund
   approveRefund: async (id: string, reason?: string) => {
-    const { data } = await axios.post(`/admin/orders/${id}/refund`, {
+    const { data } = await axios.post(`api/admin/orders/${id}/refund`, {
       reason,
     });
     return data;
@@ -33,7 +33,7 @@ export const orderApi = {
 
   // Get analytics
   getAnalytics: async (period: '24h' | '7d' | '30d' = '30d') => {
-    const { data } = await axios.get('/admin/orders/analytics', {
+    const { data } = await axios.get('api/admin/orders/analytics', {
       params: { period },
     });
     return data as {

@@ -12,13 +12,13 @@ export const paymentApi = {
     sortBy?: string;
     sortOrder?: 'asc' | 'desc';
   }): Promise<PaginatedResponse<Payment>> => {
-    const { data } = await axios.get('/admin/payments', { params });
+    const { data } = await axios.get('/api/admin/payments', { params });
     return data;
   },
 
   // Get analytics
   getAnalytics: async (period: '24h' | '7d' | '30d' = '30d') => {
-    const { data } = await axios.get('/admin/payments/analytics', {
+    const { data } = await axios.get('/api/admin/payments/analytics', {
       params: { period },
     });
     return data as {

@@ -88,7 +88,7 @@ export default function ProductCard({
       <Link href={`/products/${product.slug || product._id}`}>
         <figure className="relative">
           <img
-            src={`http://localhost:8080/${product.coverImage}` || "/placeholder.png"}
+            src={`http://13.61.7.132:8080/${product.coverImage}` || "/placeholder.png"}
             alt={product.title}
             className="w-full h-80 object-cover"
           />

@@ -19,19 +19,19 @@ export interface VerifyOtpResponse {
 export const authApi = {
   // Request OTP to mobile
   requestMobileOtp: async (phone: string): Promise<RequestOtpResponse> => {
-    const { data } = await axios.post('/auth/otp/request/mobile', { phone });
+    const { data } = await axios.post('/api/auth/otp/request/mobile', { phone });
     return data;
   },
 
   // Verify mobile OTP
   verifyMobileOtp: async (phone: string, otp: string): Promise<VerifyOtpResponse> => {
-    const { data } = await axios.post('/auth/otp/verify/mobile', { phone, otp });
+    const { data } = await axios.post('/api/auth/otp/verify/mobile', { phone, otp });
     return data;
   },
 
   // Request OTP to email
   requestEmailOtp: async (email: string, phone: string): Promise<RequestOtpResponse> => {
-    const { data } = await axios.post('/auth/otp/request/email', { email, phone });
+    const { data } = await axios.post('/api/auth/otp/request/email', { email, phone });
     return data;
   },
 
@@ -41,19 +41,19 @@ export const authApi = {
     phone: string,
     otp: string
   ): Promise<VerifyOtpResponse> => {
-    const { data } = await axios.post('/auth/otp/verify/email', { email, phone, otp });
+    const { data } = await axios.post('/api/auth/otp/verify/email', { email, phone, otp });
     return data;
   },
 
   // Get current user
   me: async () => {
-    const { data } = await axios.get('/auth/me');
+    const { data } = await axios.get('/api/auth/me');
     return data;
   },
 
   // Logout
   logout: async () => {
-    const { data } = await axios.post('/auth/logout');
+    const { data } = await axios.post('/api/auth/logout');
     return data;
   },
 };
