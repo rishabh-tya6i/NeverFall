@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { Plus, Edit, Trash2, Package } from 'lucide-react';
+import { Plus, Edit, Trash2 } from 'lucide-react';
 import { useProductStore } from '@/store/useProductStore';
 import Table from '@/components/Table';
 import Pagination from '@/components/Pagination';
@@ -9,7 +9,7 @@ import toast from 'react-hot-toast';
 import { Product } from '@/types';
 
 const Products: React.FC = () => {
-  const { products, total, page, totalPages, loading, fetchProducts, deleteProduct } =
+  const { products, page, totalPages, loading, fetchProducts, deleteProduct } =
     useProductStore();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingProduct, setEditingProduct] = useState<Product | null>(null);

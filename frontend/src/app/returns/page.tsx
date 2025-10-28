@@ -40,7 +40,7 @@ export default function ReturnsPage() {
       return returnAPI.cancel(returnId);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries(["returns"]);
+      queryClient.invalidateQueries({ queryKey: ["returns"] });
       alert("Return request cancelled successfully");
     },
     onError: (error: any) => {
@@ -244,7 +244,7 @@ export default function ReturnsPage() {
                             cancelReturnMutation.mutate(returnItem._id);
                           }
                         }}
-                        disabled={cancelReturnMutation.isLoading}
+                        disabled={cancelReturnMutation.isPending}
                         className="btn btn-error btn-sm"
                       >
                         Cancel Return

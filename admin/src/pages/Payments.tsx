@@ -15,7 +15,7 @@ const statusColors: Record<string, string> = {
 
 const Payments: React.FC = () => {
   const [payments, setPayments] = useState<Payment[]>([]);
-  const [total, setTotal] = useState(0);
+  
   const [page, setPage] = useState(1);
   const [totalPages, setTotalPages] = useState(1);
   const [loading, setLoading] = useState(false);
@@ -34,7 +34,6 @@ const Payments: React.FC = () => {
         status: statusFilter || undefined,
       });
       setPayments(data.payments || []);
-      setTotal(data.total);
       setTotalPages(data.totalPages || data.pages || 1);
     } catch (error) {
       console.error('Failed to fetch payments:', error);

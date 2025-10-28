@@ -28,8 +28,8 @@ export default function ReturnDetailsPage() {
       return returnAPI.cancel(returnId);
     },
     onSuccess: () => {
-      queryClient.invalidateQueries(["return", returnId]);
-      queryClient.invalidateQueries(["returns"]);
+      queryClient.invalidateQueries({ queryKey: ["return", returnId] });
+      queryClient.invalidateQueries({ queryKey: ["returns"] });
       alert("Return request cancelled successfully");
     },
     onError: (error: any) => {
@@ -296,10 +296,10 @@ export default function ReturnDetailsPage() {
                           cancelReturnMutation.mutate();
                         }
                       }}
-                      disabled={cancelReturnMutation.isLoading}
+                      disabled={cancelReturnMutation.isPending}
                       className="btn btn-error w-full"
                     >
-                      {cancelReturnMutation.isLoading ? "Cancelling..." : "Cancel Return"}
+                      {cancelReturnMutation.isPending ? "Cancelling..." : "Cancel Return"}
                     </button>
                   )}
 

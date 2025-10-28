@@ -19,7 +19,7 @@ const statusColors: Record<string, string> = {
 };
 
 const Orders: React.FC = () => {
-  const { orders, total, page, totalPages, loading, fetchOrders, updateOrderStatus, approveRefund } =
+  const { orders, page, totalPages, loading, fetchOrders, updateOrderStatus, approveRefund } =
     useOrderStore();
   const [selectedOrder, setSelectedOrder] = useState<Order | null>(null);
   const [isModalOpen, setIsModalOpen] = useState(false);

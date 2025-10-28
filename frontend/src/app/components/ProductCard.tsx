@@ -34,7 +34,7 @@ export default function ProductCard({
   const addToWishlistMutation = useMutation({
     mutationFn: () => wishlistAPI.add({ productId: product._id }),
     onSuccess: () => {
-      queryClient.invalidateQueries(["wishlist"]);
+      queryClient.invalidateQueries({ queryKey: ["wishlist"] });
       alert("Added to wishlist!");
     },
     onError: (error: any) => {
@@ -59,7 +59,7 @@ export default function ProductCard({
       });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries(["cart"]);
+      queryClient.invalidateQueries({ queryKey: ["cart"] });
       alert("Added to cart successfully!");
     },
     onError: (error: any) => {
@@ -132,10 +132,10 @@ export default function ProductCard({
             {showAddToCart && (
               <button
                 onClick={handleAddToCart}
-                disabled={addToCartMutation.isLoading}
+                disabled={addToCartMutation.isPending}
                 className="btn btn-primary btn-sm"
               >
-                {addToCartMutation.isLoading ? (
+                {addToCartMutation.isPending ? (
                   <span className="loading loading-spinner loading-xs"></span>
                 ) : (
                   "Add to Cart"

@@ -43,7 +43,7 @@ export default function OrdersPage() {
       return orderAPI.cancel(orderId, { reason: "Customer requested cancellation" });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries(["orders"]);
+      queryClient.invalidateQueries({ queryKey: ["orders"] });
       alert("Order cancelled successfully");
     },
     onError: (error: any) => {
@@ -225,7 +225,7 @@ export default function OrdersPage() {
                             cancelOrderMutation.mutate(order._id);
                           }
                         }}
-                        disabled={cancelOrderMutation.isLoading}
+                        disabled={cancelOrderMutation.isPending}
                         className="btn btn-error btn-sm"
                       >
                         Cancel Order

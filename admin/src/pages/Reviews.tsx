@@ -17,7 +17,6 @@ const statusColors: Record<string, string> = {
 const Reviews: React.FC = () => {
   const {
     reviews,
-    total,
     page,
     totalPages,
     loading,

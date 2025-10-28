@@ -28,8 +28,8 @@ export default function OrderDetailsPage() {
       return orderAPI.cancel(orderId, { reason: "Customer requested cancellation" });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries(["order", orderId]);
-      queryClient.invalidateQueries(["orders"]);
+      queryClient.invalidateQueries({ queryKey: ["order", orderId] });
+      queryClient.invalidateQueries({ queryKey: ["orders"] });
       alert("Order cancelled successfully");
     },
     onError: (error: any) => {
@@ -263,10 +263,10 @@ export default function OrderDetailsPage() {
                           cancelOrderMutation.mutate();
                         }
                       }}
-                      disabled={cancelOrderMutation.isLoading}
+                      disabled={cancelOrderMutation.isPending}
                       className="btn btn-error w-full"
                     >
-                      {cancelOrderMutation.isLoading ? "Cancelling..." : "Cancel Order"}
+                      {cancelOrderMutation.isPending ? "Cancelling..." : "Cancel Order"}
                     </button>
                   )}
 

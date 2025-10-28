@@ -1,5 +1,5 @@
 import axios from '@/utils/axios';
-import { Product, ParentProduct, ProductVariant, PaginatedResponse } from '@/types';
+import { Product, ParentProduct, PaginatedResponse } from '@/types';
 
 export const productApi = {
   // Get all products
@@ -34,7 +34,7 @@ export const productApi = {
   },
 
   // Update product
-  updateProduct: async (id: string, payload: Partial<Product>) => {
+  updateProduct: async (id: string, payload: any) => {
     const { data } = await axios.put(`/admin/products/${id}`, payload, {
       headers: {
         'Content-Type': 'multipart/form-data',

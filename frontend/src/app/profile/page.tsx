@@ -60,7 +60,7 @@ export default function ProfilePage() {
       return Promise.resolve({ data: { ...user, ...data } });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries(["user"]);
+      queryClient.invalidateQueries({ queryKey: ["user"] });
       setIsEditing(false);
       alert("Profile updated successfully");
     },
@@ -72,7 +72,7 @@ export default function ProfilePage() {
       return wishlistAPI.remove({ productId });
     },
     onSuccess: () => {
-      queryClient.invalidateQueries(["wishlist"]);
+      queryClient.invalidateQueries({ queryKey: ["wishlist"] });
     },
   });
 
@@ -321,10 +321,10 @@ export default function ProfilePage() {
                       <div className="flex gap-2">
                         <button
                           onClick={handleSaveProfile}
-                          disabled={updateProfileMutation.isLoading}
+                          disabled={updateProfileMutation.isPending}
                           className="btn btn-primary"
                         >
-                          {updateProfileMutation.isLoading ? "Saving..." : "Save Changes"}
+                          {updateProfileMutation.isPending ? "Saving..." : "Save Changes"}
                         </button>
                         <button
                           onClick={() => setIsEditing(false)}

@@ -1,5 +1,5 @@
 import { Router } from "express";
-import { signUpload, deleteObject } from "../controllers/media.controller.js";
+import { signUpload, deleteObject } from "../Controllers/media.controller.js";
 
 const router = Router();
 

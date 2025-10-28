@@ -50,6 +50,18 @@ export interface ParentProduct {
   updatedAt: Date;
 }
 
+export interface Category {
+  _id: string;
+  name: string;
+  slug: string;
+  parent?: string;
+  path: string;
+  image?: string;
+  sortOrder: number;
+  isActive: boolean;
+}
+
+
 export interface ProductVariant {
   _id: string;
   product: string;

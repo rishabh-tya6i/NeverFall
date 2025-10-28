@@ -4,7 +4,7 @@
 import { useState, useEffect, use } from "react";
 import { useQuery, useMutation } from "@tanstack/react-query";
 import { useRouter } from "next/navigation";
-import { cartAPI, orderAPI, deliveryAPI } from "@/services/api";
+import { cartAPI, orderAPI, deliveryAPI, paymentAPI } from "@/services/api";
 import Navbar from "../components/Navbar";
 import Footer from "../components/Footer";
 import { useOrderStore } from "../store/useOrderStore";
@@ -115,7 +115,7 @@ export default function CheckoutPage() {
       handler: async (response: any) => {
         try {
           // Verify payment
-          const res = await orderAPI.verifyPayment({
+          const res = await paymentAPI.verifyPayment({
             sessionId: paymentData.sessionId,
             gatewayPaymentId: response.razorpay_payment_id,
             gatewayOrderId: response.razorpay_order_id,
@@ -402,10 +402,10 @@ export default function CheckoutPage() {
                     </button>
                     <button
                       onClick={handlePlaceOrder}
-                      disabled={createOrderMutation.isLoading}
+                      disabled={createOrderMutation.isPending}
                       className="btn btn-primary flex-1"
                     >
-                      {createOrderMutation.isLoading ? (
+                      {createOrderMutation.isPending ? (
                         <span className="loading loading-spinner"></span>
                       ) : (
                         "Place Order"

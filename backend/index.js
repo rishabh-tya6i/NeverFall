@@ -5,7 +5,7 @@ import express from "express";
 import cors from "cors";
 import bodyParser from "body-parser";
 import cookieParser from "cookie-parser";
-import connectDB from "./Config/Db.js";
+import connectDB from "./Config/db.js";
 import authRoutes from "./Routes/auth.routes.js";
 import reviewRoutes from "./Routes/review.routes.js";
 import productRoutes from "./Routes/product.routes.js";

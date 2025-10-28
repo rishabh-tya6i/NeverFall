@@ -4,11 +4,6 @@ import StatCard from '@/components/StatCard';
 import { orderApi } from '@/api/orders';
 import { paymentApi } from '@/api/payments';
 import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  CartesianGrid,
   Tooltip,
   ResponsiveContainer,
   PieChart,

@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { Suspense, useState, useEffect } from 'react';
 import { useQuery } from '@tanstack/react-query';
 import { useRouter, useSearchParams } from 'next/navigation';
 import { productAPI } from '@/services/api';
@@ -14,7 +14,7 @@ import FilterSidebar from '../components/FilterSidebar';
 import { useProductStore } from '../store/useProductStore';
 import { useCategoryStore } from '../store/useCategoryStore';
 
-export default function ProductsPage() {
+function ProductsPageContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const {
@@ -146,5 +146,13 @@ export default function ProductsPage() {
       </div>
       <Footer />
     </>
+  );
+}
+
+export default function ProductsPage() {
+  return (
+    <Suspense fallback={<LoadingSpinner />}>
+      <ProductsPageContent />
+    </Suspense>
   );
 }
